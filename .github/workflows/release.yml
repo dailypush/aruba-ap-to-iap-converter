@@ -100,6 +100,7 @@ jobs:
           fi
 
           gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "Aruba AP to IAP Converter ${GITHUB_REF_NAME#v}" \
             --notes "Release ${GITHUB_REF_NAME#v}" \
             "${release_flags[@]}"
