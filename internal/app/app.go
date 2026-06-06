@@ -16,13 +16,13 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/chadedwards/iap325-converter/internal/config"
-	"github.com/chadedwards/iap325-converter/internal/converter"
-	"github.com/chadedwards/iap325-converter/internal/firmware"
-	"github.com/chadedwards/iap325-converter/internal/inventory"
-	"github.com/chadedwards/iap325-converter/internal/platform"
-	"github.com/chadedwards/iap325-converter/internal/station"
-	"github.com/chadedwards/iap325-converter/internal/version"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/config"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/converter"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/firmware"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/inventory"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/platform"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/station"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/version"
 )
 
 func Run() {

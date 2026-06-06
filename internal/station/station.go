@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/chadedwards/iap325-converter/internal/firmware"
-	"github.com/chadedwards/iap325-converter/internal/platform"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/firmware"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/platform"
 )
 
 type Request struct {

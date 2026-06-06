@@ -52,8 +52,8 @@ Linux and Windows platform interfaces exist as stubs for future support.
 ## Build And Run
 
 ```bash
-git clone https://github.com/chadedwards/iap325-converter.git
-cd iap325-converter
+git clone https://github.com/dailypush/aruba-ap-to-iap-converter.git
+cd aruba-ap-to-iap-converter
 go test ./...
 go run ./cmd/iap325-converter
 ```
@@ -61,7 +61,7 @@ go run ./cmd/iap325-converter
 Build a local binary:
 
 ```bash
-go build -o ./dist/iap325-converter ./cmd/iap325-converter
+go build -o ./dist/aruba-ap-to-iap-converter ./cmd/iap325-converter
 ```
 
 Build with version metadata:
@@ -71,6 +71,29 @@ Build with version metadata:
 ```
 
 The built binary will be written to `dist/`.
+
+## Publishing
+
+GitHub Actions publishes release artifacts when a version tag is pushed.
+
+Create a release candidate:
+
+```bash
+git tag v0.1.0-rc.1
+git push origin v0.1.0-rc.1
+```
+
+Create a stable release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow builds zipped macOS Apple Silicon and Intel binaries,
+stamps version metadata into the About dialog, and attaches both packages to the
+GitHub Release. Tags containing `-rc.`, `-alpha.`, or `-beta.` are published as
+GitHub prereleases.
 
 ## Basic Workflow
 

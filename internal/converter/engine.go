@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/chadedwards/iap325-converter/internal/firmware"
-	"github.com/chadedwards/iap325-converter/internal/inventory"
-	"github.com/chadedwards/iap325-converter/internal/parser"
-	serialclient "github.com/chadedwards/iap325-converter/internal/serial"
-	"github.com/chadedwards/iap325-converter/internal/version"
-	"github.com/chadedwards/iap325-converter/internal/webprobe"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/firmware"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/inventory"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/parser"
+	serialclient "github.com/dailypush/aruba-ap-to-iap-converter/internal/serial"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/version"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/webprobe"
 )
 
 type Request struct {

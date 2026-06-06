@@ -1,4 +1,4 @@
-module github.com/chadedwards/iap325-converter
+module github.com/dailypush/aruba-ap-to-iap-converter
 
 go 1.22
 

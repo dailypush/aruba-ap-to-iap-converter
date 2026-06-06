@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/chadedwards/iap325-converter/internal/app"
-	"github.com/chadedwards/iap325-converter/internal/dhcphelper"
-	"github.com/chadedwards/iap325-converter/internal/version"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/app"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/dhcphelper"
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/version"
 )
 
 func main() {

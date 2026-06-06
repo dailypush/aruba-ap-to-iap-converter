@@ -4,10 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
-    runs-on: macos-latest
+    name: Test and build
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,4 +24,4 @@ jobs:
         run: go test ./...
 
       - name: Build
-        run: go build -o dist/iap325-converter ./cmd/iap325-converter
+        run: go build -o dist/aruba-ap-to-iap-converter ./cmd/iap325-converter
