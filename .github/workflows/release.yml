@@ -26,9 +26,15 @@ jobs:
           - name: macOS Apple Silicon
             runner: macos-15
             suffix: macos-arm64
+            extension: ""
           - name: macOS Intel
             runner: macos-15-intel
             suffix: macos-intel
+            extension: ""
+          - name: Windows
+            runner: windows-latest
+            suffix: windows-amd64
+            extension: ".exe"
 
     steps:
       - name: Checkout
@@ -40,8 +46,26 @@ jobs:
           go-version: "1.22"
           cache: true
 
-      - name: Test
+      - name: Test Unix
+        if: runner.os != 'Windows'
         run: go test ./...
+
+      - name: Test Windows core
+        if: runner.os == 'Windows'
+        run: >
+          go test -timeout 5m
+          ./internal/config
+          ./internal/converter
+          ./internal/dhcphelper
+          ./internal/firmware
+          ./internal/inventory
+          ./internal/parser
+          ./internal/platform
+          ./internal/serial
+          ./internal/station
+          ./internal/tftphelper
+          ./internal/version
+          ./internal/webprobe
 
       - name: Build release binary
         shell: bash
@@ -58,15 +82,20 @@ jobs:
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           APP_NAME="aruba-ap-to-iap-converter"
           ASSET_NAME="${APP_NAME}-${VERSION}-${{ matrix.suffix }}"
+          EXTENSION="${{ matrix.extension }}"
 
           mkdir -p "dist/${ASSET_NAME}"
 
           go build \
             -ldflags "-X github.com/dailypush/aruba-ap-to-iap-converter/internal/version.Version=${VERSION} -X github.com/dailypush/aruba-ap-to-iap-converter/internal/version.Commit=${COMMIT} -X github.com/dailypush/aruba-ap-to-iap-converter/internal/version.BuiltAt=${BUILT_AT}" \
-            -o "dist/${ASSET_NAME}/${APP_NAME}" ./cmd/iap325-converter
+            -o "dist/${ASSET_NAME}/${APP_NAME}${EXTENSION}" ./cmd/iap325-converter
 
           cp README.md LICENSE CHANGELOG.md "dist/${ASSET_NAME}/"
-          (cd dist && zip -r "${ASSET_NAME}.zip" "${ASSET_NAME}")
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/${ASSET_NAME}' -DestinationPath 'dist/${ASSET_NAME}.zip' -Force"
+          else
+            (cd dist && zip -r "${ASSET_NAME}.zip" "${ASSET_NAME}")
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

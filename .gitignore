@@ -6,6 +6,7 @@
 
 # Runtime logs and local state
 /logs/
+/tftpboot/
 *.log
 *.csv
 

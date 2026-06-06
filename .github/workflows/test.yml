@@ -8,8 +8,12 @@ on:
 
 jobs:
   test:
-    name: Test and build
-    runs-on: macos-15
+    name: Test and build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,8 +24,31 @@ jobs:
           go-version: "1.22"
           cache: true
 
-      - name: Test
+      - name: Test Unix
+        if: runner.os != 'Windows'
         run: go test ./...
 
-      - name: Build
+      - name: Test Windows core
+        if: runner.os == 'Windows'
+        run: >
+          go test -timeout 5m
+          ./internal/config
+          ./internal/converter
+          ./internal/dhcphelper
+          ./internal/firmware
+          ./internal/inventory
+          ./internal/parser
+          ./internal/platform
+          ./internal/serial
+          ./internal/station
+          ./internal/tftphelper
+          ./internal/version
+          ./internal/webprobe
+
+      - name: Build Unix
+        if: runner.os != 'Windows'
         run: go build -o dist/aruba-ap-to-iap-converter ./cmd/iap325-converter
+
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        run: go build -o dist/aruba-ap-to-iap-converter.exe ./cmd/iap325-converter

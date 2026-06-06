@@ -15,6 +15,7 @@ Subtitle: AP-325 Campus-to-Instant conversion station.
 - Firmware filename/platform validation for Aruba Instant Hercules 6.x images
 - SHA256 display and operator checksum confirmation
 - macOS direct-connect setup helpers using administrator prompts
+- Windows direct-connect setup helpers using `netsh` and bundled TFTP serving
 - Optional direct-connect DHCP helper
 - Serial/APBoot conversion engine
 - AP manufacturing info detection from console output
@@ -40,14 +41,27 @@ project is not affiliated with, endorsed by, or sponsored by Aruba or HPE.
 ## Requirements
 
 - Go 1.22 or newer
-- macOS for automated station setup in the current release
+- macOS or Windows for automated station setup in the current release
 - Serial adapter connected to the AP console
 - Direct Ethernet cable to the AP
-- TFTP-capable firmware staging through `/private/tftpboot/aruba`
+- TFTP-capable firmware staging:
+  - macOS: `/private/tftpboot/aruba`
+  - Windows: local `tftpboot/aruba` folder served by the bundled helper
 - An Aruba Instant Hercules 6.x firmware image, for example:
   `ArubaInstant_Hercules_6.5.4.3_61959`
 
-Linux and Windows platform interfaces exist as stubs for future support.
+Linux platform interfaces exist as stubs for future support.
+
+## Windows Notes
+
+- Run the app as Administrator when using automatic setup. Windows needs
+  elevated rights to add the direct-connect IP address and bind UDP/69 for
+  TFTP. The optional DHCP helper also needs elevated rights for UDP/67.
+- Defaults are `COM3` for serial and `Ethernet` for the direct-connect
+  interface. Change these in the GUI if your adapter uses a different COM port
+  or Windows network-interface name.
+- The app stages firmware under `tftpboot/aruba` beside the executable/project
+  and starts a read-only bundled TFTP helper for APBoot.
 
 ## Build And Run
 
@@ -90,10 +104,10 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The release workflow builds zipped macOS Apple Silicon and Intel binaries,
-stamps version metadata into the About dialog, and attaches both packages to the
-GitHub Release. Tags containing `-rc.`, `-alpha.`, or `-beta.` are published as
-GitHub prereleases.
+The release workflow builds zipped macOS Apple Silicon, macOS Intel, and Windows
+binaries, stamps version metadata into the About dialog, and attaches the
+packages to the GitHub Release. Tags containing `-rc.`, `-alpha.`, or `-beta.`
+are published as GitHub prereleases.
 
 ## Basic Workflow
 
@@ -115,6 +129,7 @@ Runtime files are written under `logs/`:
 - `ap-inventory.csv`
 - `debug-dump-YYYYMMDD-HHMMSS.txt`
 - `dhcp-helper.log`
+- `tftp-helper.log`
 
 These files are ignored by git.
 

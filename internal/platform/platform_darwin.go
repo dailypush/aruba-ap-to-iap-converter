@@ -16,6 +16,10 @@ func current() Setup {
 	return darwinSetup{}
 }
 
+func (darwinSetup) TFTPPaths(rootDir, imageName string) (string, string) {
+	return filepath.Join("/private/tftpboot", "aruba", imageName), "aruba/" + imageName
+}
+
 func (darwinSetup) EnsureInterfaceAlias(req SetupRequest, log func(string)) error {
 	out, err := exec.Command("ifconfig", req.Interface).CombinedOutput()
 	if err != nil {
@@ -57,7 +61,7 @@ func (darwinSetup) EnsureTFTPImage(req SetupRequest, log func(string)) error {
 	return osascriptAdmin(cmd)
 }
 
-func (darwinSetup) EnsureTFTPService(log func(string)) error {
+func (darwinSetup) EnsureTFTPService(req SetupRequest, log func(string)) error {
 	if exec.Command("lsof", "-nP", "-iUDP:69").Run() == nil {
 		log("[OK] UDP/69 appears active")
 		return nil

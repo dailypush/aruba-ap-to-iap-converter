@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -384,11 +385,7 @@ func writeDebugDump(rootDir, logDir, appTitle, appSubtitle string, settings map[
 		b.WriteString(k + ": " + settings[k] + "\n")
 	}
 
-	writeCommand(&b, "ifconfig "+settings["interface"], "ifconfig", settings["interface"])
-	writeCommand(&b, "lsof serial port", "lsof", settings["serial_port"])
-	writeCommand(&b, "UDP/69 listeners", "lsof", "-nP", "-iUDP:69")
-	writeCommand(&b, "ARP table", "arp", "-an")
-	writeCommand(&b, "TFTP aruba directory", "ls", "-la", "/private/tftpboot/aruba")
+	writePlatformDebugCommands(&b, rootDir, settings)
 
 	writeFileTail(&b, filepath.Join(logDir, "conversion-results.csv"), 20)
 	writeFileTail(&b, filepath.Join(logDir, "ap-inventory.csv"), 20)
@@ -418,6 +415,30 @@ func writeDebugDump(rootDir, logDir, appTitle, appSubtitle string, settings map[
 		"- newest conversion/verify log tails",
 	}, "\n")
 	return path, summary, nil
+}
+
+func writePlatformDebugCommands(b *strings.Builder, rootDir string, settings map[string]string) {
+	switch runtime.GOOS {
+	case "windows":
+		writeCommand(b, "ipconfig", "ipconfig", "/all")
+		writeCommand(b, "interface addresses", "netsh", "interface", "ipv4", "show", "addresses", settings["interface"])
+		writeCommand(b, "UDP listeners", "netstat", "-ano", "-p", "udp")
+		writeCommand(b, "ARP table", "arp", "-a")
+		writeCommand(b, "serial port mode", "mode", settings["serial_port"])
+		writeCommand(b, "TFTP aruba directory", "cmd", "/C", "dir", filepath.Join(rootDir, "tftpboot", "aruba"))
+	case "darwin":
+		writeCommand(b, "ifconfig "+settings["interface"], "ifconfig", settings["interface"])
+		writeCommand(b, "lsof serial port", "lsof", settings["serial_port"])
+		writeCommand(b, "UDP/69 listeners", "lsof", "-nP", "-iUDP:69")
+		writeCommand(b, "ARP table", "arp", "-an")
+		writeCommand(b, "TFTP aruba directory", "ls", "-la", "/private/tftpboot/aruba")
+	default:
+		writeCommand(b, "interface address", "ip", "addr", "show", settings["interface"])
+		writeCommand(b, "serial-port ownership", "lsof", settings["serial_port"])
+		writeCommand(b, "UDP/69 listeners", "ss", "-lunp")
+		writeCommand(b, "ARP table", "arp", "-an")
+		writeCommand(b, "TFTP aruba directory", "ls", "-la", filepath.Join(rootDir, "tftpboot", "aruba"))
+	}
 }
 
 func writeSection(b *strings.Builder, title string) {

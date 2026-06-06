@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 type Config struct {
@@ -17,14 +18,24 @@ type Config struct {
 }
 
 func Defaults() Config {
-	return Config{
-		SerialPort: "/dev/cu.usbserial-A9JPRHL1",
-		Interface:  "en7",
-		Country:    "US",
-		ServerIP:   "169.254.141.5",
-		APBootIP:   "169.254.141.6",
-		APNetmask:  "255.255.255.0",
+	cfg := Config{
+		Country:   "US",
+		ServerIP:  "169.254.141.5",
+		APBootIP:  "169.254.141.6",
+		APNetmask: "255.255.255.0",
 	}
+	switch runtime.GOOS {
+	case "windows":
+		cfg.SerialPort = "COM3"
+		cfg.Interface = "Ethernet"
+	case "darwin":
+		cfg.SerialPort = "/dev/cu.usbserial-A9JPRHL1"
+		cfg.Interface = "en7"
+	default:
+		cfg.SerialPort = "/dev/ttyUSB0"
+		cfg.Interface = "eth0"
+	}
+	return cfg
 }
 
 func Path() (string, error) {

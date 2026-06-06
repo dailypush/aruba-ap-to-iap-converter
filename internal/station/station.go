@@ -42,8 +42,7 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return Prepared{}, err
 	}
-	tftpPath := filepath.Join("/private/tftpboot", "aruba", info.Name)
-	tftpImage := "aruba/" + info.Name
+	tftpPath, tftpImage := setup.TFTPPaths(req.RootDir, info.Name)
 	if err := setup.EnsureInterfaceAlias(platform.SetupRequest{
 		Interface: req.Interface,
 		ServerIP:  req.ServerIP,
@@ -71,6 +70,7 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 		if err := setup.EnsureTFTPImage(platform.SetupRequest{
 			FirmwarePath: req.FirmwarePath,
 			TFTPPath:     tftpPath,
+			TFTPRoot:     filepath.Dir(filepath.Dir(tftpPath)),
 		}, log); err != nil {
 			return Prepared{}, err
 		}
@@ -79,7 +79,13 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 		}
 	}
 	log("[OK] TFTP image present: " + tftpPath)
-	if err := setup.EnsureTFTPService(log); err != nil {
+	tftpRoot := filepath.Dir(filepath.Dir(tftpPath))
+	tftpLog := filepath.Join(logDir, "tftp-helper.log")
+	if err := setup.EnsureTFTPService(platform.SetupRequest{
+		TFTPRoot:   tftpRoot,
+		Executable: req.Executable,
+		LogPath:    tftpLog,
+	}, log); err != nil {
 		return Prepared{}, err
 	}
 	inUse, detail := setup.SerialInUse(req.SerialPort)
