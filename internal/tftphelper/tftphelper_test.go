@@ -1,17 +1,25 @@
 package tftphelper
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestSafePathAllowsNestedArubaImage(t *testing.T) {
 	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "aruba"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "aruba", "ArubaInstant_Hercules_6.5.4.3_61959"), []byte("image"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	got, err := safePath(root, "aruba/ArubaInstant_Hercules_6.5.4.3_61959")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := filepath.Join(root, "aruba", "ArubaInstant_Hercules_6.5.4.3_61959")
+	want, _ = filepath.EvalSymlinks(want)
 	if got != want {
 		t.Fatalf("path=%q want %q", got, want)
 	}

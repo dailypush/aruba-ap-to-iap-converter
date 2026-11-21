@@ -26,7 +26,7 @@ jobs:
 
       - name: Test Unix
         if: runner.os != 'Windows'
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Test Windows core
         if: runner.os == 'Windows'

@@ -3,24 +3,32 @@ package station
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/config"
 	"github.com/dailypush/aruba-ap-to-iap-converter/internal/firmware"
 	"github.com/dailypush/aruba-ap-to-iap-converter/internal/platform"
+
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/tftphelper"
 )
 
 type Request struct {
-	Interface    string
-	ServerIP     string
-	APBootIP     string
-	Netmask      string
-	FirmwarePath string
-	SerialPort   string
-	RootDir      string
-	Executable   string
-	EnableDHCP   bool
+	Interface      string
+	ServerIP       string
+	APBootIP       string
+	Netmask        string
+	FirmwarePath   string
+	SerialPort     string
+	RootDir        string
+	Executable     string
+	EnableDHCP     bool
+	ApprovedSHA256 string
 }
 
 type Prepared struct {
@@ -28,12 +36,29 @@ type Prepared struct {
 	TFTPImage string
 	TFTPPath  string
 	LogDir    string
+	Cleanup   func() error
 }
 
 func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, error) {
+	if log == nil {
+		log = func(string) {}
+	}
+	if err := config.ValidateNetwork(req.ServerIP, req.APBootIP, req.Netmask); err != nil {
+		return Prepared{}, err
+	}
+	if strings.TrimSpace(req.Interface) == "" || strings.TrimSpace(req.SerialPort) == "" {
+		return Prepared{}, fmt.Errorf("interface and serial port are required")
+	}
 	info, err := firmware.Validate(req.FirmwarePath)
 	if err != nil {
 		return Prepared{}, err
+	}
+	if req.ApprovedSHA256 == "" || info.SHA256 != req.ApprovedSHA256 {
+		return Prepared{}, fmt.Errorf("firmware changed or checksum was not approved; reselect the image and compare its SHA256 again")
+	}
+	inUse, detail := setup.SerialInUse(req.SerialPort)
+	if inUse {
+		return Prepared{}, &SerialBusyError{Detail: detail}
 	}
 	log("[OK] firmware validated: " + info.Name)
 	log("SHA256: " + info.SHA256)
@@ -50,21 +75,8 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 	}, log); err != nil {
 		return Prepared{}, err
 	}
-	if req.EnableDHCP {
-		dhcpLog := filepath.Join(logDir, "dhcp-helper.log")
-		if err := setup.EnsureDHCPHelper(platform.SetupRequest{
-			Interface: req.Interface,
-			ServerIP:  req.ServerIP,
-			LeaseIP:   req.APBootIP,
-			Netmask:   req.Netmask,
-			LogPath:   dhcpLog,
-		}, req.Executable, log); err != nil {
-			return Prepared{}, err
-		}
-		log("[OK] DHCP helper requested for " + req.APBootIP)
-		log("DHCP helper log: " + dhcpLog)
-	}
-	if verifySameSHA(req.FirmwarePath, tftpPath) == nil {
+
+	if verifySHA(tftpPath, info.SHA256) == nil {
 		log("[OK] TFTP image already matches local firmware: " + tftpPath)
 	} else {
 		if err := setup.EnsureTFTPImage(platform.SetupRequest{
@@ -74,7 +86,7 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 		}, log); err != nil {
 			return Prepared{}, err
 		}
-		if err := verifySameSHA(req.FirmwarePath, tftpPath); err != nil {
+		if err := verifySHA(tftpPath, info.SHA256); err != nil {
 			return Prepared{}, err
 		}
 	}
@@ -82,19 +94,39 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 	tftpRoot := filepath.Dir(filepath.Dir(tftpPath))
 	tftpLog := filepath.Join(logDir, "tftp-helper.log")
 	if err := setup.EnsureTFTPService(platform.SetupRequest{
-		TFTPRoot:   tftpRoot,
-		Executable: req.Executable,
-		LogPath:    tftpLog,
+		TFTPRoot:       tftpRoot,
+		ServerIP:       req.ServerIP,
+		TFTPPath:       tftpPath,
+		ExpectedSHA256: info.SHA256,
+		Executable:     req.Executable,
+		LogPath:        tftpLog,
 	}, log); err != nil {
 		return Prepared{}, err
 	}
-	inUse, detail := setup.SerialInUse(req.SerialPort)
-	if inUse {
-		return Prepared{}, &SerialBusyError{Detail: detail}
+	if err := tftphelper.Verify(net.JoinHostPort(req.ServerIP, "69"), tftpImage, info.SHA256, 20*time.Second); err != nil {
+		return Prepared{}, err
 	}
+	log("[OK] TFTP download matches the approved firmware")
 	log("[OK] serial port is free: " + req.SerialPort)
 
-	return Prepared{Firmware: info, TFTPImage: tftpImage, TFTPPath: tftpPath, LogDir: logDir}, nil
+	cleanup := func() error { return nil }
+	if req.EnableDHCP {
+		dhcpLog := filepath.Join(logDir, "dhcp-helper.log")
+		stop, err := setup.EnsureDHCPHelper(platform.SetupRequest{
+			Interface: req.Interface,
+			ServerIP:  req.ServerIP,
+			LeaseIP:   req.APBootIP,
+			Netmask:   req.Netmask,
+			LogPath:   dhcpLog,
+		}, req.Executable, log)
+		if err != nil {
+			return Prepared{}, err
+		}
+		cleanup = stop
+		log("[OK] DHCP helper ready for " + req.APBootIP)
+		log("DHCP helper log: " + dhcpLog)
+	}
+	return Prepared{Firmware: info, TFTPImage: tftpImage, TFTPPath: tftpPath, LogDir: logDir, Cleanup: cleanup}, nil
 }
 
 type SerialBusyError struct {
@@ -105,17 +137,13 @@ func (e *SerialBusyError) Error() string {
 	return "serial port is already in use"
 }
 
-func verifySameSHA(a, b string) error {
-	ha, err := fileSHA(a)
+func verifySHA(path, expected string) error {
+	actual, err := fileSHA(path)
 	if err != nil {
 		return err
 	}
-	hb, err := fileSHA(b)
-	if err != nil {
-		return err
-	}
-	if ha != hb {
-		return os.ErrInvalid
+	if actual != expected {
+		return fmt.Errorf("staged firmware checksum does not match the approved image")
 	}
 	return nil
 }

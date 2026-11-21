@@ -36,7 +36,7 @@ func ParseMfgInfo(text string) (MfgInfo, error) {
 }
 
 func CountOSInfoVersion(text, version string) int {
-	pattern := regexp.MustCompile(`(?i)version:\s*` + regexp.QuoteMeta(version))
+	pattern := regexp.MustCompile(`(?i)version:\s*` + regexp.QuoteMeta(version) + `(?:[^0-9.]|$)`)
 	return len(pattern.FindAllString(text, -1))
 }
 
@@ -80,4 +80,23 @@ func ParseDefaultIP(text string) (net.IP, bool) {
 func HasPanic(text string) bool {
 	re := regexp.MustCompile(`(?i)Kernel panic|panic:|Invalid image format|rebooting in`)
 	return re.MatchString(text)
+}
+
+// VerifyOSInfo requires a matching version in each distinct partition, rather
+// than accepting duplicate version lines or a longer version with the same prefix.
+func VerifyOSInfo(text, version string) bool {
+	headers := regexp.MustCompile(`(?im)^\s*Partition\s+([01]):`).FindAllStringSubmatchIndex(text, -1)
+	found := map[string]bool{}
+	for i, h := range headers {
+		end := len(text)
+		if i+1 < len(headers) {
+			end = headers[i+1][0]
+		}
+		part := text[h[2]:h[3]]
+		if _, exists := found[part]; exists {
+			return false
+		}
+		found[part] = CountOSInfoVersion(text[h[1]:end], version) == 1
+	}
+	return found["0"] && found["1"]
 }

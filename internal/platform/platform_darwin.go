@@ -34,25 +34,28 @@ func (darwinSetup) EnsureInterfaceAlias(req SetupRequest, log func(string)) erro
 	return osascriptAdmin(cmd)
 }
 
-func (darwinSetup) EnsureDHCPHelper(req SetupRequest, executable string, log func(string)) error {
+func (darwinSetup) EnsureDHCPHelper(req SetupRequest, executable string, log func(string)) (func() error, error) {
 	if executable == "" {
-		return fmt.Errorf("cannot start DHCP helper: executable path is empty")
+		return nil, fmt.Errorf("cannot start DHCP helper: executable path is empty")
 	}
 	logPath := req.LogPath
 	if logPath == "" {
 		logPath = filepath.Join("/tmp", "iap325-dhcp-helper.log")
 	}
-	cmd := fmt.Sprintf(
-		"nohup %s dhcp-helper --iface %s --server-ip %s --lease-ip %s --netmask %s --duration 900 >> %s 2>&1 &",
-		shell(executable),
-		shell(req.Interface),
-		shell(req.ServerIP),
-		shell(req.LeaseIP),
-		shell(req.Netmask),
-		shell(logPath),
-	)
-	log("Starting direct-connect DHCP helper with admin approval")
-	return osascriptAdmin(cmd)
+	return waitForHelper(logPath, func(readyPath string) error {
+		cmd := fmt.Sprintf(
+			"nohup %s dhcp-helper --iface %s --server-ip %s --lease-ip %s --netmask %s --duration 3600 --ready-file %s >> %s 2>&1 &",
+			shell(executable),
+			shell(req.Interface),
+			shell(req.ServerIP),
+			shell(req.LeaseIP),
+			shell(req.Netmask),
+			shell(readyPath),
+			shell(logPath),
+		)
+		log("Starting direct-connect DHCP helper with admin approval")
+		return osascriptAdmin(cmd)
+	})
 }
 
 func (darwinSetup) EnsureTFTPImage(req SetupRequest, log func(string)) error {
@@ -80,7 +83,8 @@ func (darwinSetup) SerialInUse(port string) (bool, string) {
 }
 
 func osascriptAdmin(command string) error {
-	escaped := strings.ReplaceAll(command, `"`, `\"`)
+	escaped := strings.ReplaceAll(command, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return exec.Command("osascript", "-e", `do shell script "`+escaped+`" with administrator privileges`).Run()
 }
 

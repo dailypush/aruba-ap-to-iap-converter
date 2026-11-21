@@ -58,6 +58,7 @@ func Run(cfg Config) error {
 	}
 	defer conn.Close()
 
+	slots := make(chan struct{}, 4)
 	deadline := time.Now().Add(cfg.Duration)
 	log(fmt.Sprintf("TFTP helper listening on %s rooted at %s for %s", cfg.Address, root, cfg.Duration))
 	for time.Now().Before(deadline) {
@@ -84,7 +85,12 @@ func Run(cfg Config) error {
 			continue
 		}
 		log(fmt.Sprintf("RRQ %s mode=%s from %s", name, mode, remote))
-		go serveFile(root, name, remote, log)
+		select {
+		case slots <- struct{}{}:
+			go func() { defer func() { <-slots }(); serveFile(root, name, remote, log) }()
+		default:
+			_ = sendError(conn, remote, 0, "server busy")
+		}
 	}
 	log("TFTP helper exiting after " + cfg.Duration.String())
 	return nil
@@ -103,6 +109,11 @@ func serveFile(root, name string, remote *net.UDPAddr, log func(string)) {
 		return
 	}
 	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		_ = sendErrorTo(remote, 2, "not a regular file")
+		return
+	}
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
@@ -145,17 +156,23 @@ func sendDataAndWaitACK(conn *net.UDPConn, remote *net.UDPAddr, pkt []byte, bloc
 			return err
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		n, from, err := conn.ReadFromUDP(ack)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		for {
+			n, from, err := conn.ReadFromUDP(ack)
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					break
+				}
+				return err
+			}
+			if !from.IP.Equal(remote.IP) || from.Port != remote.Port || n < 4 {
 				continue
 			}
-			return err
-		}
-		if from.IP.Equal(remote.IP) && from.Port == remote.Port && n >= 4 &&
-			binary.BigEndian.Uint16(ack[0:2]) == opACK &&
-			binary.BigEndian.Uint16(ack[2:4]) == block {
-			return nil
+			if binary.BigEndian.Uint16(ack[:2]) == opERROR {
+				return fmt.Errorf("client ended transfer")
+			}
+			if binary.BigEndian.Uint16(ack[:2]) == opACK && binary.BigEndian.Uint16(ack[2:4]) == block {
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("timeout waiting for ACK %d", block)
@@ -166,17 +183,20 @@ func parseRRQ(pkt []byte) (string, string, error) {
 		return "", "", errors.New("short RRQ")
 	}
 	parts := strings.Split(string(pkt[2:]), "\x00")
-	if len(parts) < 2 || parts[0] == "" {
+	if len(parts) < 3 || parts[0] == "" || pkt[len(pkt)-1] != 0 {
 		return "", "", errors.New("missing RRQ filename")
 	}
 	mode := strings.ToLower(parts[1])
-	if mode == "" {
-		mode = "octet"
+	if mode != "octet" {
+		return "", "", errors.New("only octet mode is supported")
 	}
 	return parts[0], mode, nil
 }
 
 func safePath(root, name string) (string, error) {
+	if strings.Contains(name, ":") {
+		return "", errors.New("invalid TFTP path")
+	}
 	clean := filepath.Clean(strings.TrimLeft(strings.ReplaceAll(name, "\\", "/"), "/"))
 	path := filepath.Join(root, filepath.FromSlash(clean))
 	rel, err := filepath.Rel(root, path)
@@ -186,7 +206,19 @@ func safePath(root, name string) (string, error) {
 	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
 		return "", errors.New("invalid TFTP path")
 	}
-	return path, nil
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	rel, err = filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("TFTP symlink escapes root")
+	}
+	return resolvedPath, nil
 }
 
 func sendErrorTo(remote *net.UDPAddr, code uint16, msg string) error {

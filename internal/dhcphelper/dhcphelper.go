@@ -6,20 +6,45 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/config"
 )
 
 type Config struct {
-	Interface string
-	ServerIP  net.IP
-	LeaseIP   net.IP
-	Netmask   net.IP
-	Duration  time.Duration
-	Log       func(string)
+	Interface  string
+	ServerIP   net.IP
+	LeaseIP    net.IP
+	Netmask    net.IP
+	Duration   time.Duration
+	Log        func(string)
+	Ready      func() error
+	ShouldStop func() bool
 }
 
 func Run(cfg Config) error {
-	if cfg.ServerIP == nil || cfg.LeaseIP == nil || cfg.Netmask == nil {
-		return errors.New("server IP, lease IP, and netmask are required")
+	if err := config.ValidateNetwork(cfg.ServerIP.String(), cfg.LeaseIP.String(), cfg.Netmask.String()); err != nil {
+		return err
+	}
+	iface, err := net.InterfaceByName(cfg.Interface)
+	if err != nil {
+		return fmt.Errorf("DHCP interface: %w", err)
+	}
+	if iface.Flags&net.FlagLoopback != 0 {
+		return fmt.Errorf("DHCP requires a direct Ethernet interface")
+	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return err
+	}
+	assigned := false
+	for _, address := range addresses {
+		ip, _, err := net.ParseCIDR(address.String())
+		if err == nil && ip.Equal(cfg.ServerIP) {
+			assigned = true
+		}
+	}
+	if !assigned {
+		return fmt.Errorf("DHCP server IP %s is not assigned to %s", cfg.ServerIP, cfg.Interface)
 	}
 	if cfg.Duration == 0 {
 		cfg.Duration = 15 * time.Minute
@@ -29,7 +54,7 @@ func Run(cfg Config) error {
 			cfg.Log(s)
 		}
 	}
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 67})
+	conn, err := listenOnInterface(iface)
 	if err != nil {
 		return fmt.Errorf("bind DHCP UDP/67: %w", err)
 	}
@@ -37,10 +62,19 @@ func Run(cfg Config) error {
 	if err := conn.SetReadBuffer(8192); err != nil {
 		log("warning: " + err.Error())
 	}
+	if cfg.Ready != nil {
+		if err := cfg.Ready(); err != nil {
+			return err
+		}
+	}
+	var clientMAC string
 	deadline := time.Now().Add(cfg.Duration)
 	log(fmt.Sprintf("DHCP helper listening on %s; offering %s from %s for %s", valueOr(cfg.Interface, "direct interface"), cfg.LeaseIP, cfg.ServerIP, cfg.Duration))
 
 	for time.Now().Before(deadline) {
+		if cfg.ShouldStop != nil && cfg.ShouldStop() {
+			return nil
+		}
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		buf := make([]byte, 1500)
 		n, remote, err := conn.ReadFromUDP(buf)
@@ -53,6 +87,12 @@ func Run(cfg Config) error {
 		msg, err := parse(buf[:n])
 		if err != nil || msg.messageType == 0 {
 			continue
+		}
+		if !acceptRequest(msg, cfg, clientMAC) {
+			continue
+		}
+		if clientMAC == "" {
+			clientMAC = msg.hwaddr.String()
 		}
 		switch msg.messageType {
 		case 1:
@@ -81,11 +121,13 @@ type message struct {
 	hwaddr      net.HardwareAddr
 	chaddr      []byte
 	messageType byte
+	serverID    net.IP
+	requestedIP net.IP
 }
 
 func parse(pkt []byte) (message, error) {
 	var msg message
-	if len(pkt) < 240 || pkt[0] != 1 || pkt[1] != 1 || pkt[2] == 0 {
+	if len(pkt) < 240 || pkt[0] != 1 || pkt[1] != 1 || pkt[2] != 6 || binary.BigEndian.Uint32(pkt[24:28]) != 0 {
 		return msg, errors.New("not an Ethernet DHCP request")
 	}
 	if binary.BigEndian.Uint32(pkt[236:240]) != 0x63825363 {
@@ -96,6 +138,7 @@ func parse(pkt []byte) (message, error) {
 		hlen = 16
 	}
 	msg.xid = append([]byte(nil), pkt[4:8]...)
+	msg.requestedIP = append(net.IP(nil), pkt[12:16]...)
 	msg.flags = append([]byte(nil), pkt[10:12]...)
 	msg.chaddr = append([]byte(nil), pkt[28:44]...)
 	msg.hwaddr = net.HardwareAddr(append([]byte(nil), pkt[28:28+hlen]...))
@@ -110,15 +153,29 @@ func parse(pkt []byte) (message, error) {
 			break
 		}
 		if i >= len(opts) {
-			break
+			return message{}, errors.New("truncated DHCP option")
 		}
 		l := int(opts[i])
 		i++
 		if i+l > len(opts) {
-			break
+			return message{}, errors.New("truncated DHCP option")
 		}
-		if code == 53 && l == 1 {
+		switch code {
+		case 53:
+			if l != 1 {
+				return message{}, errors.New("invalid DHCP message type")
+			}
 			msg.messageType = opts[i]
+		case 50, 54:
+			if l != 4 {
+				return message{}, errors.New("invalid DHCP address option")
+			}
+			ip := append(net.IP(nil), opts[i:i+l]...)
+			if code == 50 {
+				msg.requestedIP = ip
+			} else {
+				msg.serverID = ip
+			}
 		}
 		i += l
 	}
@@ -142,8 +199,6 @@ func send(conn *net.UDPConn, req message, cfg Config, messageType byte) error {
 	opts = option(opts, 54, cfg.ServerIP.To4())
 	opts = option(opts, 51, u32(3600))
 	opts = option(opts, 1, cfg.Netmask.To4())
-	opts = option(opts, 3, cfg.ServerIP.To4())
-	opts = option(opts, 6, cfg.ServerIP.To4())
 	opts = append(opts, 255)
 	pkt = append(pkt, opts...)
 
@@ -167,4 +222,20 @@ func valueOr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func acceptRequest(msg message, cfg Config, clientMAC string) bool {
+	if msg.messageType != 1 && msg.messageType != 3 {
+		return false
+	}
+	if clientMAC != "" && msg.hwaddr.String() != clientMAC {
+		return false
+	}
+	if msg.serverID != nil && !msg.serverID.Equal(cfg.ServerIP) {
+		return false
+	}
+	if msg.messageType == 3 && msg.requestedIP != nil && !msg.requestedIP.IsUnspecified() && !msg.requestedIP.Equal(cfg.LeaseIP) {
+		return false
+	}
+	return true
 }

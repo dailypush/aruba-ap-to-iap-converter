@@ -30,11 +30,14 @@ func Validate(path string) (Info, error) {
 	if err != nil {
 		return info, err
 	}
-	if st.IsDir() {
-		return info, errors.New("firmware image path is a directory")
+	if !st.Mode().IsRegular() || st.Size() == 0 {
+		return info, errors.New("firmware image must be a nonempty regular file")
 	}
 
 	name := filepath.Base(path)
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(name) {
+		return info, errors.New("firmware filename may contain only letters, digits, underscores, dots, and hyphens")
+	}
 	lower := strings.ToLower(name)
 	if !strings.Contains(lower, "arubainstant") || !strings.Contains(lower, "hercules") {
 		return info, errors.New("firmware must be an ArubaInstant Hercules image")

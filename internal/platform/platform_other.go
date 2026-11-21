@@ -21,8 +21,8 @@ func (unsupportedSetup) EnsureInterfaceAlias(req SetupRequest, log func(string))
 	return errors.New("automatic interface setup is currently implemented only on macOS and Windows")
 }
 
-func (unsupportedSetup) EnsureDHCPHelper(req SetupRequest, executable string, log func(string)) error {
-	return errors.New("automatic DHCP helper setup is currently implemented only on macOS and Windows")
+func (unsupportedSetup) EnsureDHCPHelper(req SetupRequest, executable string, log func(string)) (func() error, error) {
+	return nil, errors.New("automatic DHCP helper setup is currently implemented only on macOS and Windows")
 }
 
 func (unsupportedSetup) EnsureTFTPImage(req SetupRequest, log func(string)) error {

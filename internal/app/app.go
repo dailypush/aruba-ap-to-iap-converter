@@ -40,9 +40,9 @@ func Run() {
 
 	firmwareEntry := widget.NewEntry()
 	firmwareEntry.SetText(cfg.FirmwarePath)
-	serialEntry := widget.NewEntry()
+	serialEntry := widget.NewSelectEntry(nil)
 	serialEntry.SetText(cfg.SerialPort)
-	ifaceEntry := widget.NewEntry()
+	ifaceEntry := widget.NewSelectEntry(nil)
 	ifaceEntry.SetText(cfg.Interface)
 	countryEntry := widget.NewEntry()
 	countryEntry.SetText(cfg.Country)
@@ -69,16 +69,21 @@ func Run() {
 	var fwOK bool
 	var running bool
 	var updateConvertState func()
+	var pendingLog logBuffer
 	appendLog := func(s string) {
-		fyne.Do(func() {
-			if strings.TrimSpace(s) != "" {
-				logBox.Append(strings.TrimRight(s, "\n") + "\n")
-				lines := strings.Split(logBox.Text, "\n")
-				logBox.CursorRow = len(lines) - 1
-				logBox.CursorColumn = 0
-				logBox.Refresh()
-			}
-		})
+		if strings.TrimSpace(s) == "" {
+			return
+		}
+		if pendingLog.append(strings.TrimRight(s, "\n") + "\n") {
+			time.AfterFunc(100*time.Millisecond, func() {
+				fyne.Do(func() {
+					logBox.SetText(logTail(logBox.Text + pendingLog.drain()))
+					logBox.CursorRow = strings.Count(logBox.Text, "\n")
+					logBox.CursorColumn = 0
+					logBox.Refresh()
+				})
+			})
+		}
 	}
 	showAbout := func() {
 		dialog.ShowInformation("About "+appTitle, strings.Join([]string{
@@ -142,24 +147,45 @@ func Run() {
 			status.SetText(stage + ": " + message)
 		})
 	}
+	var validatedFirmware firmware.Info
+	var validationGeneration uint64
+	var validationTimer *time.Timer
 	validateFirmware := func() {
-		info, err := firmware.Validate(firmwareEntry.Text)
-		if err != nil {
-			fwOK = false
-			status.SetText("Firmware invalid: " + err.Error())
-			if updateConvertState != nil {
-				updateConvertState()
-			}
-			return
-		}
-		fwOK = true
-		status.SetText(fmt.Sprintf("Firmware OK: %s, version %s, SHA256 %s", info.Name, info.Version, info.SHA256))
+		validationGeneration++
+		generation := validationGeneration
+		path := strings.TrimSpace(firmwareEntry.Text)
+		fwOK = false
+		validatedFirmware = firmware.Info{}
+		checksum.SetChecked(false)
+		checksum.Disable()
+		status.SetText("Checking firmware...")
 		if updateConvertState != nil {
 			updateConvertState()
 		}
+		if validationTimer != nil {
+			validationTimer.Stop()
+		}
+		validationTimer = time.AfterFunc(350*time.Millisecond, func() {
+			info, err := firmware.Validate(path)
+			fyne.Do(func() {
+				if generation != validationGeneration {
+					return
+				}
+				if err != nil {
+					status.SetText("Firmware invalid: " + err.Error())
+				} else {
+					validatedFirmware = info
+					fwOK = true
+					checksum.Enable()
+					status.SetText(fmt.Sprintf("Firmware OK: %s, version %s, SHA256 %s", info.Name, info.Version, info.SHA256))
+				}
+				if updateConvertState != nil {
+					updateConvertState()
+				}
+			})
+		})
 	}
 	firmwareEntry.OnChanged = func(_ string) { validateFirmware() }
-	validateFirmware()
 
 	pickFirmware := widget.NewButton("Choose Firmware", func() {
 		dialog.ShowFileOpen(func(r fyne.URIReadCloser, err error) {
@@ -168,21 +194,64 @@ func Run() {
 			}
 			path := r.URI().Path()
 			_ = r.Close()
-			firmwareEntry.SetText(path)
-			validateFirmware()
+			if firmwareEntry.Text == path {
+				validateFirmware()
+			} else {
+				firmwareEntry.SetText(path)
+			}
 		}, win)
 	})
 
-	saveConfig := func() {
-		_ = config.Save(config.Config{
-			FirmwarePath: firmwareEntry.Text,
-			SerialPort:   serialEntry.Text,
-			Interface:    ifaceEntry.Text,
-			Country:      strings.ToUpper(countryEntry.Text),
-			ServerIP:     serverEntry.Text,
-			APBootIP:     apEntry.Text,
-			APNetmask:    netmaskEntry.Text,
-		})
+	currentConfig := func() config.Config {
+		return config.Config{
+			FirmwarePath: strings.TrimSpace(firmwareEntry.Text),
+			SerialPort:   strings.TrimSpace(serialEntry.Text),
+			Interface:    strings.TrimSpace(ifaceEntry.Text),
+			Country:      strings.ToUpper(strings.TrimSpace(countryEntry.Text)),
+			ServerIP:     strings.TrimSpace(serverEntry.Text),
+			APBootIP:     strings.TrimSpace(apEntry.Text),
+			APNetmask:    strings.TrimSpace(netmaskEntry.Text),
+		}
+	}
+	var refreshAdapters *widget.Button
+	refreshAdapters = widget.NewButton("Refresh adapters", func() {
+		refreshAdapters.Disable()
+		go func() {
+			ports, interfaces, err := platform.DiscoverAdapters()
+			fyne.Do(func() {
+				if !running {
+					serialEntry.SetOptions(ports)
+					ifaceEntry.SetOptions(interfaces)
+					refreshAdapters.Enable()
+				}
+				if err != nil {
+					appendLog("Adapter discovery: " + err.Error())
+				}
+			})
+		}()
+	})
+	setInputsEnabled := func(enabled bool) {
+		for _, entry := range []fyne.Disableable{firmwareEntry, serialEntry, ifaceEntry, countryEntry, serverEntry, apEntry, netmaskEntry, expectedEntry} {
+			if enabled {
+				entry.Enable()
+			} else {
+				entry.Disable()
+			}
+		}
+		for _, check := range []*widget.Check{checksum, alreadyAPBoot, enableDHCP, batchMode} {
+			if enabled {
+				check.Enable()
+			} else {
+				check.Disable()
+			}
+		}
+		if enabled {
+			pickFirmware.Enable()
+			refreshAdapters.Enable()
+		} else {
+			pickFirmware.Disable()
+			refreshAdapters.Disable()
+		}
 	}
 
 	convertButton := widget.NewButton("Convert AP", nil)
@@ -209,7 +278,6 @@ func Run() {
 		if running {
 			return
 		}
-		validateFirmware()
 		if !fwOK {
 			dialog.ShowError(fmt.Errorf("select a valid Aruba Instant Hercules 6.x image first"), win)
 			return
@@ -218,8 +286,24 @@ func Run() {
 			dialog.ShowError(fmt.Errorf("confirm the SHA256 checksum before conversion"), win)
 			return
 		}
-		saveConfig()
+		runConfig := currentConfig()
+		expectedSerial := strings.TrimSpace(expectedEntry.Text)
+		if err := runConfig.Validate(); err != nil {
+			dialog.ShowError(err, win)
+			return
+		}
+		if err := config.ValidateSerial(expectedSerial); err != nil {
+			dialog.ShowError(err, win)
+			return
+		}
+		approvedSHA := validatedFirmware.SHA256
+		resume, dhcp, batch := alreadyAPBoot.Checked, enableDHCP.Checked, batchMode.Checked
+		if err := config.Save(runConfig); err != nil {
+			dialog.ShowError(fmt.Errorf("save settings: %w", err), win)
+			return
+		}
 		running = true
+		setInputsEnabled(false)
 		convertButton.Disable()
 		convertButton.SetText("Convert AP")
 		logBox.SetText("")
@@ -230,23 +314,27 @@ func Run() {
 
 		go func() {
 			defer func() {
-				running = false
-				fyne.Do(updateConvertState)
+				fyne.Do(func() {
+					running = false
+					setInputsEnabled(true)
+					updateConvertState()
+				})
 			}()
 
 			setup := platform.Current()
 			executable, _ := os.Executable()
 			setProgress("station-setup", 1, 12, "Preparing direct-connect station")
 			prep, err := station.Prepare(station.Request{
-				Interface:    ifaceEntry.Text,
-				ServerIP:     serverEntry.Text,
-				APBootIP:     apEntry.Text,
-				Netmask:      netmaskEntry.Text,
-				FirmwarePath: firmwareEntry.Text,
-				SerialPort:   serialEntry.Text,
-				RootDir:      rootDir,
-				Executable:   executable,
-				EnableDHCP:   enableDHCP.Checked,
+				Interface:      runConfig.Interface,
+				ServerIP:       runConfig.ServerIP,
+				APBootIP:       runConfig.APBootIP,
+				Netmask:        runConfig.APNetmask,
+				FirmwarePath:   runConfig.FirmwarePath,
+				SerialPort:     runConfig.SerialPort,
+				RootDir:        rootDir,
+				Executable:     executable,
+				EnableDHCP:     dhcp,
+				ApprovedSHA256: approvedSHA,
 			}, setup, appendLog)
 			if err != nil {
 				fyne.Do(func() {
@@ -263,22 +351,27 @@ func Run() {
 				Progress: setProgress,
 			}
 			res, err := engine.Run(context.Background(), converter.Request{
-				Port:           serialEntry.Text,
+				Port:           runConfig.SerialPort,
 				Baud:           9600,
-				Country:        strings.ToUpper(countryEntry.Text),
-				ExpectedSerial: strings.TrimSpace(expectedEntry.Text),
-				ServerIP:       serverEntry.Text,
-				APBootIP:       apEntry.Text,
-				APBootNetmask:  netmaskEntry.Text,
+				Country:        runConfig.Country,
+				ExpectedSerial: expectedSerial,
+				ServerIP:       runConfig.ServerIP,
+				APBootIP:       runConfig.APBootIP,
+				APBootNetmask:  runConfig.APNetmask,
 				TFTPImage:      prep.TFTPImage,
 				Firmware:       prep.Firmware,
 				LogDir:         prep.LogDir,
 				BootTimeout:    180 * time.Second,
-				AlreadyAPBoot:  alreadyAPBoot.Checked,
+				AlreadyAPBoot:  resume,
 			})
+			if cleanupErr := prep.Cleanup(); cleanupErr != nil {
+				res.Warning = strings.TrimSpace(res.Warning + " " + cleanupErr.Error())
+				res.Message += "; " + cleanupErr.Error()
+				appendLog(cleanupErr.Error())
+			}
 			fyne.Do(func() {
 				if err != nil {
-					status.SetText("Conversion failed.")
+					status.SetText("Conversion stopped: " + res.Stage)
 					result.SetText(fmt.Sprintf("Stage: %s\nMessage: %s\nLog: %s", res.Stage, res.Message, res.LogPath))
 					dialog.ShowError(err, win)
 					return
@@ -287,7 +380,11 @@ func Run() {
 				progressText.SetText("Step 12/12: Conversion complete")
 				status.SetText("Conversion succeeded.")
 				result.SetText(fmt.Sprintf("Serial: %s\nWired MAC: %s\nVersion: %s\nLog: %s\nWebUI: %s", res.Serial, res.WiredMAC, res.ImageVersion, res.LogPath, res.WebURL))
-				if batchMode.Checked {
+				if res.Warning != "" {
+					status.SetText("Converted; attention needed.")
+					dialog.ShowInformation("Conversion warning", res.Warning, win)
+				}
+				if batch && res.Warning == "" {
 					alreadyAPBoot.SetChecked(false)
 					expectedEntry.SetText("")
 					status.SetText("Batch ready: connect the next AP, then click Convert Next AP.")
@@ -297,11 +394,25 @@ func Run() {
 		}()
 	}
 	updateConvertState()
+	// Recheck on launch without blocking the event loop.
+	validateFirmware()
+	refreshAdapters.OnTapped()
+	win.SetCloseIntercept(func() {
+		if running {
+			dialog.ShowInformation("Conversion in progress", "Wait for conversion to finish before closing. Interrupting a firmware write may leave the AP unusable.", win)
+			return
+		}
+		validationGeneration++
+		if validationTimer != nil {
+			validationTimer.Stop()
+		}
+		win.Close()
+	})
 
 	requiredForm := widget.NewForm(
 		widget.NewFormItem("Firmware", container.NewBorder(nil, nil, nil, pickFirmware, firmwareEntry)),
 		widget.NewFormItem("Serial Port", serialEntry),
-		widget.NewFormItem("Interface", ifaceEntry),
+		widget.NewFormItem("Interface", container.NewBorder(nil, nil, nil, refreshAdapters, ifaceEntry)),
 		widget.NewFormItem("Country", countryEntry),
 	)
 	networkForm := widget.NewForm(
@@ -390,6 +501,7 @@ func writeDebugDump(rootDir, logDir, appTitle, appSubtitle string, settings map[
 	writeFileTail(&b, filepath.Join(logDir, "conversion-results.csv"), 20)
 	writeFileTail(&b, filepath.Join(logDir, "ap-inventory.csv"), 20)
 	writeFileTail(&b, filepath.Join(logDir, "dhcp-helper.log"), 80)
+	writeFileTail(&b, filepath.Join(logDir, "tftp-helper.log"), 80)
 	for _, file := range newestLogs(logDir, "auto-convert-", 3) {
 		writeFileTail(&b, file, 120)
 	}
@@ -447,7 +559,9 @@ func writeSection(b *strings.Builder, title string) {
 
 func writeCommand(b *strings.Builder, title string, name string, args ...string) {
 	writeSection(b, title)
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		b.WriteString("error: " + err.Error() + "\n")

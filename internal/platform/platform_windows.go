@@ -4,10 +4,15 @@ package platform
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/tftphelper"
 )
 
 type windowsSetup struct{}
@@ -37,34 +42,51 @@ func (windowsSetup) EnsureInterfaceAlias(req SetupRequest, log func(string)) err
 	return nil
 }
 
-func (windowsSetup) EnsureDHCPHelper(req SetupRequest, executable string, log func(string)) error {
+func (windowsSetup) EnsureDHCPHelper(req SetupRequest, executable string, log func(string)) (func() error, error) {
 	if executable == "" {
-		return fmt.Errorf("cannot start DHCP helper: executable path is empty")
+		return nil, fmt.Errorf("cannot start DHCP helper: executable path is empty")
 	}
 	logPath := req.LogPath
 	if logPath == "" {
 		logPath = filepath.Join(os.TempDir(), "iap325-dhcp-helper.log")
 	}
 	log("Starting direct-connect DHCP helper. Windows may require Administrator privileges for UDP/67.")
-	cmd := exec.Command(executable, "dhcp-helper",
-		"--iface", req.Interface,
-		"--server-ip", req.ServerIP,
-		"--lease-ip", req.LeaseIP,
-		"--netmask", req.Netmask,
-		"--duration", "900",
-	)
-	return startDetached(cmd, logPath)
+	return waitForHelper(logPath, func(readyPath string) error {
+		cmd := exec.Command(executable, "dhcp-helper",
+			"--ready-file", readyPath,
+			"--iface", req.Interface,
+			"--server-ip", req.ServerIP,
+			"--lease-ip", req.LeaseIP,
+			"--netmask", req.Netmask,
+			"--duration", "3600",
+		)
+		return startDetached(cmd, logPath)
+	})
 }
 
 func (windowsSetup) EnsureTFTPImage(req SetupRequest, log func(string)) error {
 	if err := os.MkdirAll(filepath.Dir(req.TFTPPath), 0755); err != nil {
 		return err
 	}
-	data, err := os.ReadFile(req.FirmwarePath)
+	source, err := os.Open(req.FirmwarePath)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(req.TFTPPath, data, 0644); err != nil {
+	defer source.Close()
+	target, err := os.CreateTemp(filepath.Dir(req.TFTPPath), ".firmware-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(target.Name())
+	_, copyErr := io.Copy(target, source)
+	closeErr := target.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(target.Name(), req.TFTPPath); err != nil {
 		return err
 	}
 	log("[OK] staged TFTP image: " + req.TFTPPath)
@@ -82,9 +104,16 @@ func (windowsSetup) EnsureTFTPService(req SetupRequest, log func(string)) error 
 	if logPath == "" {
 		logPath = filepath.Join(os.TempDir(), "iap325-tftp-helper.log")
 	}
+	name := "aruba/" + filepath.Base(req.TFTPPath)
+	address := net.JoinHostPort(req.ServerIP, "69")
+	if tftphelper.Verify(address, name, req.ExpectedSHA256, 2*time.Second) == nil {
+		log("[OK] existing TFTP service serves the approved image")
+		return nil
+	}
 	log("Starting bundled Windows TFTP helper on UDP/69 rooted at " + req.TFTPRoot)
 	cmd := exec.Command(req.Executable, "tftp-helper",
 		"--root", req.TFTPRoot,
+		"--address", address,
 		"--duration", "1800",
 	)
 	if err := startDetached(cmd, logPath); err != nil {

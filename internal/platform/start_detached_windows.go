@@ -18,5 +18,8 @@ func startDetached(cmd *exec.Cmd, logPath string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 	err = cmd.Start()
 	_ = f.Close()
+	if err == nil {
+		go func() { _ = cmd.Wait() }()
+	}
 	return err
 }

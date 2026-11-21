@@ -47,7 +47,7 @@ func (c *Client) ReadUntil(pattern *regexp.Regexp, timeout time.Duration) (strin
 			if c.log != nil {
 				c.log(chunk)
 			}
-			if pattern.MatchString(buf.String()) {
+			if pattern.Match(buf.Bytes()) {
 				return buf.String(), nil
 			}
 		}
@@ -60,9 +60,10 @@ func (c *Client) ReadUntil(pattern *regexp.Regexp, timeout time.Duration) (strin
 
 func (c *Client) Drain(quietFor time.Duration) string {
 	deadline := time.Now().Add(quietFor)
+	hardDeadline := time.Now().Add(quietFor + 2*time.Second)
 	var buf bytes.Buffer
 	tmp := make([]byte, 512)
-	for time.Now().Before(deadline) {
+	for time.Now().Before(deadline) && time.Now().Before(hardDeadline) {
 		n, err := c.port.Read(tmp)
 		if n > 0 {
 			chunk := string(tmp[:n])
@@ -93,7 +94,7 @@ func (c *Client) CatchAPBoot(timeout time.Duration) (string, error) {
 			if c.log != nil {
 				c.log(chunk)
 			}
-			if apboot.MatchString(buf.String()) {
+			if apboot.Match(buf.Bytes()) {
 				_ = c.Drain(300 * time.Millisecond)
 				return buf.String(), nil
 			}

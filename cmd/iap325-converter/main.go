@@ -27,6 +27,7 @@ func main() {
 
 func runDHCPHelper(args []string) {
 	fs := flag.NewFlagSet("dhcp-helper", flag.ExitOnError)
+	readyFile := fs.String("ready-file", "", "startup readiness file")
 	iface := fs.String("iface", "", "direct Ethernet interface")
 	serverIP := fs.String("server-ip", "", "DHCP server IP")
 	leaseIP := fs.String("lease-ip", "", "IP to offer")
@@ -36,14 +37,39 @@ func runDHCPHelper(args []string) {
 
 	err := dhcphelper.Run(dhcphelper.Config{
 		Interface: *iface,
-		ServerIP:  net.ParseIP(*serverIP),
-		LeaseIP:   net.ParseIP(*leaseIP),
-		Netmask:   net.ParseIP(*netmask),
-		Duration:  time.Duration(*duration) * time.Second,
+		Ready: func() error {
+			if *readyFile == "" {
+				return nil
+			}
+			f, err := os.OpenFile(*readyFile, os.O_WRONLY|os.O_TRUNC, 0600)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			_, err = f.WriteString("ready")
+			return err
+		},
+		ShouldStop: func() bool {
+			if *readyFile == "" {
+				return false
+			}
+			data, err := os.ReadFile(*readyFile)
+			return err != nil || string(data) == "stop"
+		},
+		ServerIP: net.ParseIP(*serverIP),
+		LeaseIP:  net.ParseIP(*leaseIP),
+		Netmask:  net.ParseIP(*netmask),
+		Duration: time.Duration(*duration) * time.Second,
 		Log: func(s string) {
 			fmt.Println(time.Now().Format(time.RFC3339), "iap325-converter", version.Display(), s)
 		},
 	})
+	if *readyFile != "" {
+		if f, openErr := os.OpenFile(*readyFile, os.O_WRONLY|os.O_TRUNC, 0600); openErr == nil {
+			_, _ = f.WriteString("stopped")
+			_ = f.Close()
+		}
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

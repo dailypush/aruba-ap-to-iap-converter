@@ -16,5 +16,8 @@ func startDetached(cmd *exec.Cmd, logPath string) error {
 	cmd.Stderr = f
 	err = cmd.Start()
 	_ = f.Close()
+	if err == nil {
+		go func() { _ = cmd.Wait() }()
+	}
 	return err
 }

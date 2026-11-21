@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/dailypush/aruba-ap-to-iap-converter/internal/config"
 	"github.com/dailypush/aruba-ap-to-iap-converter/internal/firmware"
 	"github.com/dailypush/aruba-ap-to-iap-converter/internal/inventory"
 	"github.com/dailypush/aruba-ap-to-iap-converter/internal/parser"
@@ -42,15 +42,29 @@ type Result struct {
 	Message      string
 	LogPath      string
 	WebURL       string
+	Warning      string
+}
+
+type Console interface {
+	Close() error
+	SendLine(string) error
+	ReadUntil(*regexp.Regexp, time.Duration) (string, error)
+	Drain(time.Duration) string
+	CatchAPBoot(time.Duration) (string, error)
+	ExpectAPBoot(time.Duration) (string, error)
 }
 
 type Engine struct {
-	Store    inventory.Store
-	Log      func(string)
-	Progress func(stage string, current, total int, message string)
+	openConsole func(string, int, func(string)) (Console, error)
+	Store       inventory.Store
+	Log         func(string)
+	Progress    func(stage string, current, total int, message string)
 }
 
 func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
+	if err := validateRequest(req); err != nil {
+		return Result{Status: "FAILED", Stage: "preflight", Message: err.Error()}, err
+	}
 	if req.Baud == 0 {
 		req.Baud = 9600
 	}
@@ -60,17 +74,22 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 	if err := os.MkdirAll(req.LogDir, 0755); err != nil {
 		return Result{}, err
 	}
-	logPath := filepath.Join(req.LogDir, "auto-convert-"+time.Now().Format("20060102-150405")+".log")
-	f, err := os.Create(logPath)
+	f, err := os.CreateTemp(req.LogDir, "auto-convert-"+time.Now().Format("20060102-150405")+"-*.log")
 	if err != nil {
 		return Result{}, err
 	}
 	defer f.Close()
+	logPath := f.Name()
+	var transcriptErr error
 
 	log := func(s string) {
-		_, _ = f.WriteString(s)
+		if _, err := f.WriteString(s); err != nil {
+			transcriptErr = err
+		}
 		if !strings.HasSuffix(s, "\n") {
-			_, _ = f.WriteString("\n")
+			if _, err := f.WriteString("\n"); err != nil {
+				transcriptErr = err
+			}
 		}
 		if e.Log != nil {
 			e.Log(s)
@@ -87,7 +106,7 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 		res.Status = status
 		res.Stage = stage
 		res.Message = message
-		_ = e.Store.AppendResult(inventory.Result{
+		persistErr := e.Store.AppendResult(inventory.Result{
 			Timestamp:    time.Now(),
 			Serial:       valueOr(res.Serial, "UNKNOWN"),
 			WiredMAC:     valueOr(res.WiredMAC, "UNKNOWN"),
@@ -98,9 +117,20 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 			Message:      message,
 			LogPath:      logPath,
 		})
+		if err := errors.Join(transcriptErr, persistErr); err != nil {
+			res.Warning = "Recording incomplete: " + err.Error() + ". Preserve the AP serial and conversion details before continuing."
+			res.Message += "; " + res.Warning
+			log(res.Warning)
+		}
 	}
 
-	client, err := serialclient.Open(req.Port, req.Baud, log)
+	open := e.openConsole
+	if open == nil {
+		open = func(port string, baud int, log func(string)) (Console, error) {
+			return serialclient.Open(port, baud, log)
+		}
+	}
+	client, err := open(req.Port, req.Baud, log)
 	if err != nil {
 		writeResult("FAILED", "serial", err.Error())
 		return res, err
@@ -200,7 +230,7 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 	stage = "verify-images"
 	progress(stage, 8, "Verifying both partitions")
 	osinfo, err := command(client, "osinfo", 2*time.Minute)
-	if err != nil || reject(osinfo) || parser.CountOSInfoVersion(osinfo, req.Firmware.Version) < 2 {
+	if err != nil || reject(osinfo) || !parser.VerifyOSInfo(osinfo, req.Firmware.Version) {
 		writeResult("FAILED", stage, "osinfo did not show target version "+req.Firmware.Version+" on both partitions")
 		return res, fmt.Errorf("osinfo verification failed")
 	}
@@ -221,17 +251,38 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 		writeResult("FAILED", stage, err.Error())
 		return res, err
 	}
-	boot, err := client.ReadUntil(regexp.MustCompile(`(?i)ArubaOS Version\s+`+regexp.QuoteMeta(req.Firmware.Version)), 5*time.Minute)
+	boot, err := client.ReadUntil(regexp.MustCompile(`(?i)ArubaOS Version\s+`+regexp.QuoteMeta(req.Firmware.Version)+`(?:\s|\()|`+panicPattern), 5*time.Minute)
 	if err != nil || parser.HasPanic(boot) {
-		writeResult("FAILED", stage, "Timed out waiting for target image "+req.Firmware.Version+" to boot")
+		writeResult("FAILED", stage, "Target image boot verification failed (timeout, serial error, or panic)")
 		return res, fmt.Errorf("first boot verification failed")
 	}
 	log("Target image " + req.Firmware.Version + " is booting.")
 
 	stage = "webui"
 	progress(stage, 11, "Waiting for WebUI/default IP")
-	postBoot, _ := client.ReadUntil(regexp.MustCompile(`(?i)Default IP is ready|Picked\s+up\s+default\s+IP\s+[0-9a-fA-F]{8}|User:`), 3*time.Minute)
-	postBoot += client.Drain(2 * time.Second)
+	postBoot := boot
+	if !bootReady.MatchString(postBoot) {
+		rest, readErr := client.ReadUntil(bootReadyOrPanic, 3*time.Minute)
+		postBoot += rest
+		if parser.HasPanic(postBoot) {
+			writeResult("FAILED", stage, "Firmware flashed, but the AP reported a panic or reboot during startup")
+			return res, fmt.Errorf("post-boot panic or reboot detected")
+		}
+		if readErr != nil {
+			writeResult("UNVERIFIED", stage, "Firmware flashed; startup readiness could not be verified: "+readErr.Error())
+			return res, fmt.Errorf("startup readiness: %w", readErr)
+		}
+	}
+	tail, tailErr := client.ReadUntil(regexp.MustCompile(`(?i)`+panicPattern), 2*time.Second)
+	postBoot += tail
+	if parser.HasPanic(postBoot) {
+		writeResult("FAILED", stage, "Firmware flashed, but the AP reported a panic or reboot during startup")
+		return res, fmt.Errorf("post-boot panic or reboot detected")
+	}
+	if tailErr != nil && !errors.Is(tailErr, serialclient.ErrTimeout) {
+		writeResult("UNVERIFIED", stage, "Firmware flashed; serial monitoring stopped: "+tailErr.Error())
+		return res, fmt.Errorf("post-boot monitoring: %w", tailErr)
+	}
 	if ip, ok := parser.ParseDefaultIP(postBoot); ok {
 		progress(stage, 11, "Probing WebUI at "+ip.String())
 		if probed, ok := webprobe.Probe(ctx, ip.String(), ""); ok {
@@ -243,13 +294,16 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 
-	writeResult("SUCCESS", "complete", "Target Instant image booted")
+	if err := f.Sync(); err != nil {
+		transcriptErr = err
+	}
+	writeResult("SUCCESS", "complete", "Target Instant image reached startup readiness")
 	progress("complete", 12, "Conversion complete")
 	log("SUCCESS: converted AP " + res.Serial + " to Instant Hercules " + req.Firmware.Version)
 	return res, nil
 }
 
-func command(client *serialclient.Client, cmd string, timeout time.Duration) (string, error) {
+func command(client Console, cmd string, timeout time.Duration) (string, error) {
 	client.Drain(300 * time.Millisecond)
 	if err := client.SendLine(cmd); err != nil {
 		return "", err
@@ -257,20 +311,13 @@ func command(client *serialclient.Client, cmd string, timeout time.Duration) (st
 	return client.ReadUntil(regexp.MustCompile(`(?s)apboot\s*> ?$`), timeout)
 }
 
-func commandExpect(client *serialclient.Client, cmd string, expected *regexp.Regexp, timeout time.Duration, attempts int) (string, error) {
+func commandExpect(client Console, cmd string, expected *regexp.Regexp, timeout time.Duration, attempts int) (string, error) {
 	var last string
 	var lastErr error
 	for i := 0; i < attempts; i++ {
-		client.Drain(300 * time.Millisecond)
-		if err := client.SendLine(cmd); err != nil {
-			return "", err
-		}
-		out, err := client.ReadUntil(expected, timeout)
-		if err == nil {
-			rest, restErr := client.ReadUntil(regexp.MustCompile(`(?s)apboot\s*> ?$`), 10*time.Second)
-			out += rest
-			err = restErr
-		}
+		// Read through the prompt in one operation. A single serial read can contain
+		// both the expected marker and the prompt; a second read would lose it.
+		out, err := command(client, cmd, timeout)
 		last = out
 		lastErr = err
 		if err == nil && expected.MatchString(out) {
@@ -294,4 +341,31 @@ func valueOr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+const panicPattern = `Kernel panic|panic:|Invalid image format|rebooting in`
+
+var bootReady = regexp.MustCompile(`(?i)Default IP is ready|User:`)
+var bootReadyOrPanic = regexp.MustCompile(`(?i)Default IP is ready|User:|` + panicPattern)
+
+func validateRequest(req Request) error {
+	if strings.TrimSpace(req.Port) == "" {
+		return fmt.Errorf("serial port is required")
+	}
+	if err := config.ValidateCountry(req.Country); err != nil {
+		return err
+	}
+	if err := config.ValidateSerial(req.ExpectedSerial); err != nil {
+		return err
+	}
+	if err := config.ValidateNetwork(req.ServerIP, req.APBootIP, req.APBootNetmask); err != nil {
+		return err
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_./-]+$`).MatchString(req.TFTPImage) {
+		return fmt.Errorf("TFTP image name contains unsupported characters")
+	}
+	if req.Firmware.Version == "" {
+		return fmt.Errorf("validated firmware version is required")
+	}
+	return nil
 }

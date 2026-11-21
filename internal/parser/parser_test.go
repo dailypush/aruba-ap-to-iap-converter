@@ -73,3 +73,19 @@ func TestCountOSInfoVersion(t *testing.T) {
 		t.Fatal("expected two version matches")
 	}
 }
+
+func TestVerifyOSInfoRejectsFalseMatches(t *testing.T) {
+	for _, text := range []string{
+		"Partition 0:\n version: 6.5.4.3\n version: 6.5.4.3\n",
+		"Partition 0:\n version: 6.5.4.30\nPartition 1:\n version: 6.5.4.30\n",
+		"Partition 0:\n version: 6.5.4.3\nPartition 0:\n version: 6.5.4.3\n",
+		"Partition 0:\n version: 6.5.4.3\nPartition 1:\n version: 8.5.0.3\n",
+	} {
+		if VerifyOSInfo(text, "6.5.4.3") {
+			t.Errorf("accepted invalid partitions: %q", text)
+		}
+	}
+	if !VerifyOSInfo("Partition 0:\n version: 6.5.4.3-6.5.4.3\nPartition 1:\n version: 6.5.4.3-6.5.4.3\n", "6.5.4.3") {
+		t.Fatal("rejected matching partitions")
+	}
+}
