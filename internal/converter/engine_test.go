@@ -39,10 +39,14 @@ func (f *fakeConsole) ReadUntil(pattern *regexp.Regexp, _ time.Duration) (string
 	if command == "boot" {
 		f.bootReads++
 		if f.bootReads == 1 {
-			if f.initialBoot != "" {
-				return f.initialBoot, nil
+			out := f.initialBoot
+			if out == "" {
+				out = "ArubaOS Version 6.5.4.3 (build 61959)\n"
 			}
-			return "ArubaOS Version 6.5.4.3 (build 61959)\n", nil
+			if !pattern.MatchString(out) {
+				return out, serialclient.ErrTimeout
+			}
+			return out, nil
 		}
 		if f.bootReads > 2 {
 			if f.monitorTail != "" || f.monitorErr != nil {
@@ -108,6 +112,9 @@ func TestConversionFailureSafeguards(t *testing.T) {
 		{"panic after ready", func(r *Request, f *fakeConsole) { f.monitorTail = "Kernel panic: late failure" }, "FAILED", ""},
 		{"disconnect after ready", func(r *Request, f *fakeConsole) { f.monitorErr = errors.New("disconnected") }, "UNVERIFIED", ""},
 		{"early panic", func(r *Request, f *fakeConsole) { f.initialBoot = "Kernel panic: early failure" }, "FAILED", ""},
+		{"different boot version", func(r *Request, f *fakeConsole) {
+			f.initialBoot = "ArubaOS Version 6.5.4.30-6.5.4.30 (build 61959)\n"
+		}, "FAILED", ""},
 		{"late panic", func(r *Request, f *fakeConsole) { f.bootTail = "Kernel panic: startup failed" }, "FAILED", ""},
 		{"boot timeout", func(r *Request, f *fakeConsole) { f.bootTail = ""; f.bootErr = serialclient.ErrTimeout }, "UNVERIFIED", ""},
 		{"serial disconnected", func(r *Request, f *fakeConsole) { f.bootTail = ""; f.bootErr = errors.New("disconnected") }, "UNVERIFIED", ""},
@@ -143,7 +150,7 @@ func TestRecordingFailurePreservesConversionOutcome(t *testing.T) {
 
 func TestBootReadyInSameSerialRead(t *testing.T) {
 	engine, req, console := fixture(t)
-	console.initialBoot = "ArubaOS Version 6.5.4.3 (build 61959)\nDefault IP is ready\nUser:"
+	console.initialBoot = "[    0.000000] ArubaOS Version 6.5.4.3-6.5.4.3 (build 61959 / label #61959) \r\nDefault IP is ready\r\nUser:"
 	console.bootTail = ""
 	console.bootErr = serialclient.ErrTimeout
 	result, err := engine.Run(context.Background(), req)

@@ -263,7 +263,10 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 		writeResult("FAILED", stage, err.Error())
 		return res, err
 	}
-	boot, err := client.ReadUntil(regexp.MustCompile(`(?i)ArubaOS Version\s+`+regexp.QuoteMeta(req.Firmware.Version)+`(?:\s|\()|`+panicPattern), 5*time.Minute)
+	// Instant banners can append a second dotted version, as in
+	// "ArubaOS Version 6.5.4.3-6.5.4.3 (build 61959)".
+	bootVersionOrPanic := regexp.MustCompile(`(?i)ArubaOS Version\s+` + regexp.QuoteMeta(req.Firmware.Version) + `(?:-[0-9]+(?:\.[0-9]+){3})?(?:\s|\()|` + panicPattern)
+	boot, err := client.ReadUntil(bootVersionOrPanic, 5*time.Minute)
 	if err != nil || parser.HasPanic(boot) {
 		writeResult("FAILED", stage, "Target image boot verification failed (timeout, serial error, or panic)")
 		return res, fmt.Errorf("first boot verification failed")
