@@ -82,18 +82,24 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 	logPath := f.Name()
 	var transcriptErr error
 
-	log := func(s string) {
+	atLineStart := true
+	writeLog := func(s string) {
+		if s == "" {
+			return
+		}
 		if _, err := f.WriteString(s); err != nil {
 			transcriptErr = err
 		}
-		if !strings.HasSuffix(s, "\n") {
-			if _, err := f.WriteString("\n"); err != nil {
-				transcriptErr = err
-			}
-		}
+		atLineStart = strings.HasSuffix(s, "\n")
 		if e.Log != nil {
 			e.Log(s)
 		}
+	}
+	log := func(s string) {
+		if !atLineStart {
+			s = "\n" + s
+		}
+		writeLog(strings.TrimRight(s, "\n") + "\n")
 	}
 
 	res := Result{Status: "FAILED", Stage: "startup", LogPath: logPath, ImageVersion: req.Firmware.Version}
@@ -130,7 +136,7 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 			return serialclient.Open(port, baud, log)
 		}
 	}
-	client, err := open(req.Port, req.Baud, log)
+	client, err := open(req.Port, req.Baud, writeLog)
 	if err != nil {
 		writeResult("FAILED", "serial", err.Error())
 		return res, err
@@ -138,7 +144,11 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 	defer client.Close()
 
 	stage := "catch-apboot"
-	progress(stage, 2, "Waiting for APBoot")
+	if req.AlreadyAPBoot {
+		progress(stage, 2, "Checking for the APBoot prompt")
+	} else {
+		progress(stage, 2, "Waiting for APBoot. Power-cycle the AP now.")
+	}
 	log("Automated AP-325 conversion starting")
 	log("App version: " + version.Display() + " built " + version.BuiltAt)
 	if req.AlreadyAPBoot {
@@ -195,10 +205,12 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 			return res, fmt.Errorf("failed: %s", cmd)
 		}
 	}
+	progress(stage, 4, "Checking whether APBoot can reach "+req.ServerIP)
 	ping, err := command(client, "ping "+req.ServerIP, 120*time.Second)
 	if err != nil || !regexp.MustCompile(`(?i)is alive|host .* alive|bytes from`).MatchString(ping) {
-		writeResult("FAILED", stage, "APBoot did not confirm that the TFTP server is reachable")
-		return res, fmt.Errorf("TFTP server not reachable")
+		message := fmt.Sprintf("APBoot could not confirm reachability to %s. Check the direct Ethernet link and the selected Mac adapter before trying again.", req.ServerIP)
+		writeResult("FAILED", stage, message)
+		return res, errors.New(message)
 	}
 
 	stage = "inventory"

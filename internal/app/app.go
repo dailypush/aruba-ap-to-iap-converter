@@ -54,18 +54,31 @@ func Run() {
 	netmaskEntry := widget.NewEntry()
 	netmaskEntry.SetText(cfg.APNetmask)
 	expectedEntry := widget.NewEntry()
-	alreadyAPBoot := widget.NewCheck("AP is already at apboot> (I verified 235 MB DRAM)", nil)
+	alreadyAPBoot := widget.NewCheck("Resume at apboot> (235 MB verified)", nil)
 	enableDHCP := widget.NewCheck("Run direct-connect DHCP helper", nil)
-	batchMode := widget.NewCheck("Batch mode: re-enable for next AP after success", nil)
-	checksum := widget.NewCheck("I compared the SHA256 with the official Aruba checksum", nil)
-	status := widget.NewLabel("Select firmware and confirm checksum.")
-	result := widget.NewLabel("")
-	progressText := widget.NewLabel("Idle")
+	batchMode := widget.NewCheck("Batch mode", nil)
+	checksum := widget.NewCheck("I verified the official SHA256", nil)
+	status := widget.NewLabel("Select a firmware image")
+	firmwareDetails := widget.NewLabel("")
+	firmwareDetails.Wrapping = fyne.TextWrapBreak
+	firmwareDetails.Selectable = true
+	result := widget.NewLabel("No conversion has run in this session.")
+	result.Selectable = true
+	progressText := widget.NewLabel("Step 0 of 12")
+	status.TextStyle = fyne.TextStyle{Bold: true}
 	progressBar := widget.NewProgressBar()
-	logBox := widget.NewMultiLineEntry()
-	logBox.Wrapping = fyne.TextWrapWord
-	logBox.SetMinRowsVisible(10)
-	logBox.Disable()
+	logBox := widget.NewLabel("")
+	logBox.Wrapping = fyne.TextWrapBreak
+	logBox.TextStyle = fyne.TextStyle{Monospace: true}
+	logBox.Selectable = true
+	logScroll := container.NewVScroll(logBox)
+	followLog := widget.NewCheck("Follow output", func(checked bool) {
+		if checked {
+			logScroll.ScrollToBottom()
+		}
+	})
+	followLog.SetChecked(true)
+	var visibleLog string
 
 	var fwOK bool
 	var running bool
@@ -83,30 +96,45 @@ func Run() {
 	}
 	var logFailure sync.Once
 	var pendingLog logBuffer
+	reportLogError := func(err error) {
+		if err == nil {
+			return
+		}
+		logFailure.Do(func() {
+			fyne.Do(func() {
+				logLocation.SetText("Session log write failed: " + err.Error())
+				dialog.ShowError(fmt.Errorf("session log could not be written: %w", err), win)
+			})
+		})
+	}
+	queueLog := func(s string) {
+		if pendingLog.append(s) {
+			time.AfterFunc(100*time.Millisecond, func() {
+				fyne.Do(func() {
+					visibleLog = logTail(visibleLog + pendingLog.drain())
+					logBox.SetText(displayLog(visibleLog))
+					logScroll.Refresh()
+					if followLog.Checked {
+						logScroll.ScrollToBottom()
+					}
+				})
+			})
+		}
+	}
 	appendLog := func(s string) {
 		if strings.TrimSpace(s) == "" {
 			return
 		}
 		if session != nil {
-			if err := session.Write(s); err != nil {
-				logFailure.Do(func() {
-					fyne.Do(func() {
-						logLocation.SetText("Session log write failed: " + err.Error())
-						dialog.ShowError(fmt.Errorf("session log could not be written: %w", err), win)
-					})
-				})
-			}
+			reportLogError(session.Write(s))
 		}
-		if pendingLog.append(strings.TrimRight(s, "\n") + "\n") {
-			time.AfterFunc(100*time.Millisecond, func() {
-				fyne.Do(func() {
-					logBox.SetText(logTail(logBox.Text + pendingLog.drain()))
-					logBox.CursorRow = strings.Count(logBox.Text, "\n")
-					logBox.CursorColumn = 0
-					logBox.Refresh()
-				})
-			})
+		queueLog(strings.TrimRight(s, "\n") + "\n")
+	}
+	appendConsole := func(s string) {
+		if session != nil {
+			reportLogError(session.WriteRaw(s))
 		}
+		queueLog(s)
 	}
 	showError := func(err error) {
 		appendLog("[ERROR] " + err.Error())
@@ -167,14 +195,14 @@ func Run() {
 		content.SetMinRowsVisible(14)
 		dialog.ShowCustom("Debug Dump", "OK", container.NewPadded(content), win)
 	}
-	setProgress := func(stage string, current, total int, message string) {
+	setProgress := func(_ string, current, total int, message string) {
 		fyne.Do(func() {
 			if total <= 0 {
 				return
 			}
 			progressBar.SetValue(float64(current) / float64(total))
-			progressText.SetText(fmt.Sprintf("Step %d/%d: %s", current, total, message))
-			status.SetText(stage + ": " + message)
+			progressText.SetText(fmt.Sprintf("Step %d of %d", current, total))
+			status.SetText(message)
 		})
 	}
 	var validatedFirmware firmware.Info
@@ -188,7 +216,8 @@ func Run() {
 		validatedFirmware = firmware.Info{}
 		checksum.SetChecked(false)
 		checksum.Disable()
-		status.SetText("Checking firmware...")
+		status.SetText("Checking firmware")
+		firmwareDetails.SetText("")
 		if updateConvertState != nil {
 			updateConvertState()
 		}
@@ -202,12 +231,14 @@ func Run() {
 					return
 				}
 				if err != nil {
-					status.SetText("Firmware invalid: " + err.Error())
+					status.SetText("Choose a valid firmware image")
+					firmwareDetails.SetText(err.Error())
 				} else {
 					validatedFirmware = info
 					fwOK = true
 					checksum.Enable()
-					status.SetText(fmt.Sprintf("Firmware OK: %s, version %s, SHA256 %s", info.Name, info.Version, info.SHA256))
+					status.SetText("Compare the SHA256 before starting")
+					firmwareDetails.SetText(fmt.Sprintf("Version %s\nSHA256 %s", info.Version, info.SHA256))
 				}
 				if updateConvertState != nil {
 					updateConvertState()
@@ -217,7 +248,7 @@ func Run() {
 	}
 	firmwareEntry.OnChanged = func(_ string) { validateFirmware() }
 
-	pickFirmware := widget.NewButton("Choose Firmware", func() {
+	pickFirmware := widget.NewButton("Browse…", func() {
 		dialog.ShowFileOpen(func(r fyne.URIReadCloser, err error) {
 			if err != nil {
 				showError(err)
@@ -291,7 +322,6 @@ func Run() {
 	convertButton := widget.NewButton("Convert AP", nil)
 	convertButton.Importance = widget.HighImportance
 	debugButton := widget.NewButton("Dump Debug Info", dumpDebug)
-	aboutButton := widget.NewButton("About", showAbout)
 	win.SetMainMenu(fyne.NewMainMenu(
 		fyne.NewMenu("Tools",
 			fyne.NewMenuItem("Dump Debug Info", dumpDebug),
@@ -307,7 +337,16 @@ func Run() {
 		}
 		convertButton.Enable()
 	}
-	checksum.OnChanged = func(bool) { updateConvertState() }
+	checksum.OnChanged = func(checked bool) {
+		updateConvertState()
+		if !running && fwOK && progressBar.Value == 0 {
+			if checked {
+				status.SetText("Ready to convert")
+			} else {
+				status.SetText("Compare the SHA256 before starting")
+			}
+		}
+	}
 	convertButton.OnTapped = func() {
 		if running {
 			return
@@ -337,14 +376,16 @@ func Run() {
 			return
 		}
 		running = true
+		visibleLog = ""
+		logBox.SetText("")
+		logScroll.ScrollToTop()
 		appendLog(fmt.Sprintf("Starting conversion: interface=%s server=%s ap=%s serial_port=%s expected_serial=%s dhcp=%t", runConfig.Interface, runConfig.ServerIP, runConfig.APBootIP, runConfig.SerialPort, expectedSerial, dhcp))
 		setInputsEnabled(false)
 		convertButton.Disable()
 		convertButton.SetText("Convert AP")
-		logBox.SetText("")
-		result.SetText("")
+		result.SetText("Conversion in progress.")
 		progressBar.SetValue(0)
-		progressText.SetText("Starting...")
+		progressText.SetText("Step 1 of 12")
 		status.SetText("Preparing station...")
 
 		go func() {
@@ -380,10 +421,9 @@ func Run() {
 				return
 			}
 
-			fyne.Do(func() { status.SetText("Waiting for AP power-cycle/APBoot...") })
 			engine := converter.Engine{
 				Store:    inventory.New(logDir),
-				Log:      appendLog,
+				Log:      appendConsole,
 				Progress: setProgress,
 			}
 			res, err := engine.Run(context.Background(), converter.Request{
@@ -407,17 +447,27 @@ func Run() {
 			}
 			fyne.Do(func() {
 				if err != nil {
-					status.SetText("Conversion stopped: " + res.Stage)
-					result.SetText(fmt.Sprintf("Stage: %s\nMessage: %s\nLog: %s", res.Stage, res.Message, res.LogPath))
+					status.SetText("Conversion stopped")
+					message := res.Message
+					if message == "" {
+						message = err.Error()
+					}
+					if res.Stage == "factory-reset" {
+						message = "Both firmware partitions were verified. Reset or boot confirmation was interrupted. Review the console before retrying."
+					}
+					result.SetText(message)
+					if res.LogPath != "" {
+						appendLog("Conversion transcript: " + res.LogPath)
+					}
 					showError(err)
 					return
 				}
 				progressBar.SetValue(1)
-				progressText.SetText("Step 12/12: Conversion complete")
+				progressText.SetText("Step 12 of 12")
 				status.SetText("Conversion succeeded.")
 				result.SetText(fmt.Sprintf("Serial: %s\nWired MAC: %s\nVersion: %s\nLog: %s\nWebUI: %s", res.Serial, res.WiredMAC, res.ImageVersion, res.LogPath, res.WebURL))
 				if res.Warning != "" {
-					status.SetText("Converted; attention needed.")
+					status.SetText("Converted with a warning")
 					appendLog("[WARNING] " + res.Warning)
 					dialog.ShowInformation("Conversion warning", res.Warning, win)
 				}
@@ -449,7 +499,7 @@ func Run() {
 	requiredForm := widget.NewForm(
 		widget.NewFormItem("Firmware", container.NewBorder(nil, nil, nil, pickFirmware, firmwareEntry)),
 		widget.NewFormItem("Serial Port", serialEntry),
-		widget.NewFormItem("Interface", container.NewBorder(nil, nil, nil, refreshAdapters, ifaceEntry)),
+		widget.NewFormItem("Interface", ifaceEntry),
 		widget.NewFormItem("Country", countryEntry),
 	)
 	networkForm := widget.NewForm(
@@ -458,55 +508,50 @@ func Run() {
 		widget.NewFormItem("APBoot Netmask", netmaskEntry),
 	)
 	advancedForm := widget.NewForm(
-		widget.NewFormItem("Expected Serial (optional safety check)", expectedEntry),
-		widget.NewFormItem("Resume", alreadyAPBoot),
-		widget.NewFormItem("DHCP Helper", enableDHCP),
-		widget.NewFormItem("Batch", batchMode),
+		widget.NewFormItem("Expected serial", expectedEntry),
 	)
 	advanced := widget.NewAccordion(
 		widget.NewAccordionItem("Network Defaults", networkForm),
-		widget.NewAccordionItem("Advanced Options", advancedForm),
+		widget.NewAccordionItem("Conversion options", container.NewVBox(advancedForm, alreadyAPBoot, enableDHCP, batchMode)),
 	)
 	status.Wrapping = fyne.TextWrapWord
 	result.Wrapping = fyne.TextWrapWord
 	progressText.Wrapping = fyne.TextWrapWord
 
+	expectedEntry.SetPlaceHolder("Optional")
 	actionPanel := container.NewVBox(
+		container.NewHBox(convertButton, debugButton),
 		checksum,
-		container.NewHBox(convertButton, debugButton, aboutButton),
+		status,
 		progressText,
 		progressBar,
-		status,
+		result,
 	)
-	setupCard := widget.NewCard("Setup", "Required fields for one conversion station", container.NewVBox(
+	setupScroll := container.NewVScroll(container.NewPadded(container.NewVBox(
+		widget.NewLabelWithStyle("Station setup", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		requiredForm,
+		refreshAdapters,
+		firmwareDetails,
 		advanced,
-	))
-	actionCard := widget.NewCard("Run", "Confirm checksum, then start conversion", actionPanel)
-	resultCard := widget.NewCard("Result", "Latest conversion output", result)
-	topPanel := container.NewGridWithColumns(
-		2,
-		container.NewVBox(setupCard),
-		container.NewVBox(actionCard, resultCard),
-	)
+	)))
+	setupScroll.SetMinSize(fyne.NewSize(365, 240))
 
-	logPanel := container.NewBorder(
-		container.NewVBox(widget.NewLabel("Live activity log"), logLocation),
-		nil,
-		nil,
-		nil,
-		container.NewPadded(logBox),
+	copyPath := widget.NewButton("Copy log path", func() { fyneApp.Clipboard().SetContent(sessionPath) })
+	if session == nil {
+		copyPath.Disable()
+	}
+	logHeader := container.NewVBox(
+		container.NewBorder(nil, nil,
+			widget.NewLabelWithStyle("Live activity", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			container.NewHBox(followLog, copyPath)),
+		logLocation,
 	)
-	mainSplit := container.NewVSplit(container.NewVScroll(topPanel), logPanel)
-	mainSplit.SetOffset(0.52)
+	logPanel := container.NewBorder(logHeader, nil, nil, nil, logScroll)
+	runPanel := container.NewBorder(container.NewVBox(actionPanel, widget.NewSeparator()), nil, nil, nil, logPanel)
+	workspace := container.NewHSplit(setupScroll, container.NewPadded(runPanel))
+	workspace.SetOffset(0.37)
+	win.SetContent(workspace)
 
-	win.SetContent(container.NewBorder(
-		widget.NewRichTextFromMarkdown("## "+appTitle+"\n"+appSubtitle),
-		nil,
-		nil,
-		nil,
-		mainSplit,
-	))
 	win.ShowAndRun()
 }
 

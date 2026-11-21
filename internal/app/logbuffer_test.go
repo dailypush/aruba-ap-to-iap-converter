@@ -31,3 +31,17 @@ func TestLiveLogIsBounded(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestLiveLogPreservesSerialLinesAcrossReads(t *testing.T) {
+	var b logBuffer
+	b.append("ARP Retry co")
+	b.append("unt exceeded\r\r")
+	firstBatch := b.drain()
+	b.append("\neth0: link up\r")
+	b.append("\n\x13Using eth0 device\r\n")
+	got := displayLog(firstBatch + b.drain())
+	want := "ARP Retry count exceeded\neth0: link up\nUsing eth0 device\n"
+	if got != want {
+		t.Fatalf("display output = %q, want %q", got, want)
+	}
+}

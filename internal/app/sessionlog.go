@@ -12,8 +12,9 @@ import (
 // Session logs start before station setup, so errors preceding serial capture
 // are retained. Disk writes are synchronous; only the UI rendering is batched.
 type sessionLog struct {
-	mu   sync.Mutex
-	file *os.File
+	mu          sync.Mutex
+	file        *os.File
+	partialLine bool
 }
 
 func newSessionLog(dir string) (*sessionLog, error) {
@@ -32,7 +33,24 @@ func (l *sessionLog) Path() string { return filepath.Clean(l.file.Name()) }
 func (l *sessionLog) Write(message string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, err := fmt.Fprintf(l.file, "%s %s\n", time.Now().Format(time.RFC3339Nano), strings.TrimRight(message, "\n"))
+	prefix := ""
+	if l.partialLine {
+		prefix = "\n"
+	}
+	_, err := fmt.Fprintf(l.file, "%s%s %s\n", prefix, time.Now().Format(time.RFC3339Nano), strings.TrimRight(message, "\n"))
+	if err == nil {
+		l.partialLine = false
+	}
+	return err
+}
+
+func (l *sessionLog) WriteRaw(text string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, err := l.file.WriteString(text)
+	if err == nil && text != "" {
+		l.partialLine = !strings.HasSuffix(text, "\n")
+	}
 	return err
 }
 

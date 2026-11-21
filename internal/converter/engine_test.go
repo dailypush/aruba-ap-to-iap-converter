@@ -151,3 +151,26 @@ func TestBootReadyInSameSerialRead(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
+
+func TestTranscriptPreservesSerialReadBoundaries(t *testing.T) {
+	engine, req, console := fixture(t)
+	var live strings.Builder
+	engine.Log = func(s string) { live.WriteString(s) }
+	engine.openConsole = func(_ string, _ int, log func(string)) (Console, error) {
+		log("ARP Retry co")
+		log("unt exceeded\r")
+		log("\n")
+		return console, nil
+	}
+	result, err := engine.Run(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk, err := os.ReadFile(result.LogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(onDisk) != live.String() || !strings.Contains(live.String(), "ARP Retry count exceeded\r\n") {
+		t.Fatal("serial reads were not joined consistently in the transcript and live output")
+	}
+}

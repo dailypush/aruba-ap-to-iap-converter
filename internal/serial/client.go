@@ -29,7 +29,7 @@ func (c *Client) Close() error {
 
 func (c *Client) SendLine(line string) error {
 	if c.log != nil {
-		c.log(line)
+		c.log(line + "\n")
 	}
 	_, err := c.port.Write([]byte(line + "\r"))
 	return err

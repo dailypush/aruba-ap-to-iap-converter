@@ -1,8 +1,10 @@
 package app
 
 import (
+	"regexp"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -48,3 +50,17 @@ func (b *logBuffer) drain() string {
 	b.scheduled = false
 	return s
 }
+
+// Serial reads are arbitrary chunks. Normalize line endings only once the
+// chunks have been joined, so a CRLF split across reads stays one newline.
+func displayLog(s string) string {
+	s = serialLineEnding.ReplaceAllString(s, "\n")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+var serialLineEnding = regexp.MustCompile(`\r+\n?`)
