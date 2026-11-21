@@ -274,16 +274,26 @@ func (e Engine) Run(ctx context.Context, req Request) (Result, error) {
 	log("Target image " + req.Firmware.Version + " is booting.")
 
 	stage = "webui"
-	progress(stage, 11, "Waiting for WebUI/default IP")
+	progress(stage, 11, "Waiting for Instant startup (up to 5 minutes)")
 	postBoot := boot
 	if !bootReady.MatchString(postBoot) {
-		rest, readErr := client.ReadUntil(bootReadyOrPanic, 3*time.Minute)
+		// A factory-reset Instant AP can reboot once to initialize its storage
+		// and then wait for DHCP before starting with a fallback IP.
+		rest, readErr := client.ReadUntil(bootReadyOrPanic, 5*time.Minute)
 		postBoot += rest
 		if parser.HasPanic(postBoot) {
 			writeResult("FAILED", stage, "Firmware flashed, but the AP reported a panic or reboot during startup")
 			return res, fmt.Errorf("post-boot panic or reboot detected")
 		}
 		if readErr != nil {
+			if errors.Is(readErr, serialclient.ErrTimeout) {
+				message := "Firmware flashed and booted. Instant did not report startup readiness within 5 minutes."
+				if ip, ok := parser.ParseDefaultIP(postBoot); ok {
+					message += " Last reported fallback IP: " + ip.String() + "."
+				}
+				writeResult("UNVERIFIED", stage, message)
+				return res, fmt.Errorf("%s %w", message, readErr)
+			}
 			writeResult("UNVERIFIED", stage, "Firmware flashed; startup readiness could not be verified: "+readErr.Error())
 			return res, fmt.Errorf("startup readiness: %w", readErr)
 		}

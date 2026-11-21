@@ -25,6 +25,7 @@ type fakeConsole struct {
 	monitorErr       error
 	bootTail         string
 	bootErr          error
+	bootReadyTimeout time.Duration
 }
 
 func (f *fakeConsole) Close() error               { return nil }
@@ -34,7 +35,7 @@ func (f *fakeConsole) CatchAPBoot(time.Duration) (string, error) {
 	return "DRAM: 235 MB\napboot> ", nil
 }
 func (f *fakeConsole) ExpectAPBoot(time.Duration) (string, error) { return "apboot> ", nil }
-func (f *fakeConsole) ReadUntil(pattern *regexp.Regexp, _ time.Duration) (string, error) {
+func (f *fakeConsole) ReadUntil(pattern *regexp.Regexp, timeout time.Duration) (string, error) {
 	command := f.commands[len(f.commands)-1]
 	if command == "boot" {
 		f.bootReads++
@@ -54,6 +55,7 @@ func (f *fakeConsole) ReadUntil(pattern *regexp.Regexp, _ time.Duration) (string
 			}
 			return "", serialclient.ErrTimeout
 		}
+		f.bootReadyTimeout = timeout
 		return f.bootTail, f.bootErr
 	}
 	if f.consumedCommands == len(f.commands) {
@@ -155,6 +157,22 @@ func TestBootReadyInSameSerialRead(t *testing.T) {
 	console.bootErr = serialclient.ErrTimeout
 	result, err := engine.Run(context.Background(), req)
 	if err != nil || result.Status != "SUCCESS" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestStartupReadinessTimeoutReportsFallbackIP(t *testing.T) {
+	engine, req, console := fixture(t)
+	console.bootTail = "Will reboot to mount ubifs\r\n" +
+		"ArubaOS Version 6.5.4.3-6.5.4.3 (build 61959)\r\n" +
+		"[ 134.646922] Picked up default IP a9fea559, rand a559\r\n"
+	console.bootErr = serialclient.ErrTimeout
+	result, err := engine.Run(context.Background(), req)
+	if console.bootReadyTimeout != 5*time.Minute {
+		t.Fatalf("startup readiness wait = %v, want 5 minutes", console.bootReadyTimeout)
+	}
+	if result.Status != "UNVERIFIED" || !errors.Is(err, serialclient.ErrTimeout) ||
+		!strings.Contains(result.Message, "169.254.165.89") || !strings.Contains(err.Error(), "169.254.165.89") {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
