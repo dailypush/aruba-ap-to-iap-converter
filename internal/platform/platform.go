@@ -1,5 +1,10 @@
 package platform
 
+import (
+	"net"
+	"runtime"
+)
+
 type SetupRequest struct {
 	Interface      string
 	ServerIP       string
@@ -24,4 +29,19 @@ type Setup interface {
 
 func Current() Setup {
 	return current()
+}
+
+// TFTPVerifyAddress is the endpoint for a local service check, separate from
+// the server address sent to APBoot. macOS launchd serves TFTP on loopback;
+// accessing a local link-local alias can hit an Ethernet/ARP reject route.
+// Windows binds the bundled helper to the selected server address instead.
+func TFTPVerifyAddress(serverIP string) string {
+	return tftpVerifyAddress(runtime.GOOS, serverIP)
+}
+
+func tftpVerifyAddress(goos, serverIP string) string {
+	if goos == "darwin" {
+		return "127.0.0.1:69"
+	}
+	return net.JoinHostPort(serverIP, "69")
 }

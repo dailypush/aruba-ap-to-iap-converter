@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -69,10 +70,32 @@ func Run() {
 	var fwOK bool
 	var running bool
 	var updateConvertState func()
+	session, sessionErr := newSessionLog(logDir)
+	sessionPath := "unavailable"
+	if session != nil {
+		sessionPath = session.Path()
+		defer session.Close()
+	}
+	logLocation := widget.NewLabel("Session log: " + sessionPath)
+	logLocation.Wrapping = fyne.TextWrapWord
+	if sessionErr != nil {
+		logLocation.SetText("Session logging unavailable: " + sessionErr.Error())
+	}
+	var logFailure sync.Once
 	var pendingLog logBuffer
 	appendLog := func(s string) {
 		if strings.TrimSpace(s) == "" {
 			return
+		}
+		if session != nil {
+			if err := session.Write(s); err != nil {
+				logFailure.Do(func() {
+					fyne.Do(func() {
+						logLocation.SetText("Session log write failed: " + err.Error())
+						dialog.ShowError(fmt.Errorf("session log could not be written: %w", err), win)
+					})
+				})
+			}
 		}
 		if pendingLog.append(strings.TrimRight(s, "\n") + "\n") {
 			time.AfterFunc(100*time.Millisecond, func() {
@@ -85,6 +108,12 @@ func Run() {
 			})
 		}
 	}
+	showError := func(err error) {
+		appendLog("[ERROR] " + err.Error())
+		dialog.ShowError(err, win)
+	}
+	appendLog("App started: " + version.Display() + " built " + version.BuiltAt)
+	appendLog("Working directory: " + rootDir + "; session log: " + sessionPath)
 	showAbout := func() {
 		dialog.ShowInformation("About "+appTitle, strings.Join([]string{
 			appTitle,
@@ -109,6 +138,7 @@ func Run() {
 	dumpDebug := func() {
 		path, summary, err := writeDebugDump(rootDir, logDir, appTitle, appSubtitle, map[string]string{
 			"app_version":     version.Version,
+			"session_log":     sessionPath,
 			"app_commit":      version.Commit,
 			"app_built_at":    version.BuiltAt,
 			"firmware":        firmwareEntry.Text,
@@ -128,7 +158,7 @@ func Run() {
 			"progress":        progressText.Text,
 		})
 		if err != nil {
-			dialog.ShowError(err, win)
+			showError(err)
 			return
 		}
 		appendLog("[OK] debug dump written: " + path)
@@ -189,7 +219,11 @@ func Run() {
 
 	pickFirmware := widget.NewButton("Choose Firmware", func() {
 		dialog.ShowFileOpen(func(r fyne.URIReadCloser, err error) {
-			if err != nil || r == nil {
+			if err != nil {
+				showError(err)
+				return
+			}
+			if r == nil {
 				return
 			}
 			path := r.URI().Path()
@@ -279,30 +313,31 @@ func Run() {
 			return
 		}
 		if !fwOK {
-			dialog.ShowError(fmt.Errorf("select a valid Aruba Instant Hercules 6.x image first"), win)
+			showError(fmt.Errorf("select a valid Aruba Instant Hercules 6.x image first"))
 			return
 		}
 		if !checksum.Checked {
-			dialog.ShowError(fmt.Errorf("confirm the SHA256 checksum before conversion"), win)
+			showError(fmt.Errorf("confirm the SHA256 checksum before conversion"))
 			return
 		}
 		runConfig := currentConfig()
 		expectedSerial := strings.TrimSpace(expectedEntry.Text)
 		if err := runConfig.Validate(); err != nil {
-			dialog.ShowError(err, win)
+			showError(err)
 			return
 		}
 		if err := config.ValidateSerial(expectedSerial); err != nil {
-			dialog.ShowError(err, win)
+			showError(err)
 			return
 		}
 		approvedSHA := validatedFirmware.SHA256
 		resume, dhcp, batch := alreadyAPBoot.Checked, enableDHCP.Checked, batchMode.Checked
 		if err := config.Save(runConfig); err != nil {
-			dialog.ShowError(fmt.Errorf("save settings: %w", err), win)
+			showError(fmt.Errorf("save settings: %w", err))
 			return
 		}
 		running = true
+		appendLog(fmt.Sprintf("Starting conversion: interface=%s server=%s ap=%s serial_port=%s expected_serial=%s dhcp=%t", runConfig.Interface, runConfig.ServerIP, runConfig.APBootIP, runConfig.SerialPort, expectedSerial, dhcp))
 		setInputsEnabled(false)
 		convertButton.Disable()
 		convertButton.SetText("Convert AP")
@@ -339,7 +374,8 @@ func Run() {
 			if err != nil {
 				fyne.Do(func() {
 					status.SetText("Station setup failed.")
-					dialog.ShowError(err, win)
+					result.SetText("Error: " + err.Error() + "\nSession log: " + sessionPath)
+					showError(err)
 				})
 				return
 			}
@@ -373,7 +409,7 @@ func Run() {
 				if err != nil {
 					status.SetText("Conversion stopped: " + res.Stage)
 					result.SetText(fmt.Sprintf("Stage: %s\nMessage: %s\nLog: %s", res.Stage, res.Message, res.LogPath))
-					dialog.ShowError(err, win)
+					showError(err)
 					return
 				}
 				progressBar.SetValue(1)
@@ -382,6 +418,7 @@ func Run() {
 				result.SetText(fmt.Sprintf("Serial: %s\nWired MAC: %s\nVersion: %s\nLog: %s\nWebUI: %s", res.Serial, res.WiredMAC, res.ImageVersion, res.LogPath, res.WebURL))
 				if res.Warning != "" {
 					status.SetText("Converted; attention needed.")
+					appendLog("[WARNING] " + res.Warning)
 					dialog.ShowInformation("Conversion warning", res.Warning, win)
 				}
 				if batch && res.Warning == "" {
@@ -454,7 +491,7 @@ func Run() {
 	)
 
 	logPanel := container.NewBorder(
-		widget.NewLabel("Live serial log"),
+		container.NewVBox(widget.NewLabel("Live activity log"), logLocation),
 		nil,
 		nil,
 		nil,
@@ -502,6 +539,9 @@ func writeDebugDump(rootDir, logDir, appTitle, appSubtitle string, settings map[
 	writeFileTail(&b, filepath.Join(logDir, "ap-inventory.csv"), 20)
 	writeFileTail(&b, filepath.Join(logDir, "dhcp-helper.log"), 80)
 	writeFileTail(&b, filepath.Join(logDir, "tftp-helper.log"), 80)
+	for _, file := range newestLogs(logDir, "app-session-", 2) {
+		writeFileTail(&b, file, 120)
+	}
 	for _, file := range newestLogs(logDir, "auto-convert-", 3) {
 		writeFileTail(&b, file, 120)
 	}
@@ -523,7 +563,8 @@ func writeDebugDump(rootDir, logDir, appTitle, appSubtitle string, settings map[
 		"- ARP table",
 		"- TFTP image directory listing",
 		"- CSV tails",
-		"- DHCP helper log tail",
+		"- DHCP/TFTP helper log tails",
+		"- app session logs, including setup errors",
 		"- newest conversion/verify log tails",
 	}, "\n")
 	return path, summary, nil

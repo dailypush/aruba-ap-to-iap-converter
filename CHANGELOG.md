@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Log setup failures and displayed errors from startup in a visible session log;
+  include session logs and underlying helper failures in diagnostics.
+- Launch the macOS DHCP helper without `nohup`, which could fail to detach from
+  the terminal-free AppleScript administrator session.
+
+- Use loopback for the macOS local TFTP check to avoid rejected routes to the
+  station's own Ethernet alias; retain the selected server IP for APBoot.
+
 - Bind checksum approval to the validated image and verify the staged TFTP bytes.
 - Validate network/country/serial inputs and snapshot settings before conversion.
 - Discover serial and Ethernet adapters; hash firmware off the UI thread and

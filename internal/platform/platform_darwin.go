@@ -43,16 +43,11 @@ func (darwinSetup) EnsureDHCPHelper(req SetupRequest, executable string, log fun
 		logPath = filepath.Join("/tmp", "iap325-dhcp-helper.log")
 	}
 	return waitForHelper(logPath, func(readyPath string) error {
-		cmd := fmt.Sprintf(
-			"nohup %s dhcp-helper --iface %s --server-ip %s --lease-ip %s --netmask %s --duration 3600 --ready-file %s >> %s 2>&1 &",
-			shell(executable),
-			shell(req.Interface),
-			shell(req.ServerIP),
-			shell(req.LeaseIP),
-			shell(req.Netmask),
-			shell(readyPath),
-			shell(logPath),
-		)
+		cmd := backgroundCommand(executable, []string{
+			"dhcp-helper", "--iface", req.Interface,
+			"--server-ip", req.ServerIP, "--lease-ip", req.LeaseIP,
+			"--netmask", req.Netmask, "--duration", "3600", "--ready-file", readyPath,
+		}, logPath)
 		log("Starting direct-connect DHCP helper with admin approval")
 		return osascriptAdmin(cmd)
 	})
@@ -85,7 +80,11 @@ func (darwinSetup) SerialInUse(port string) (bool, string) {
 func osascriptAdmin(command string) error {
 	escaped := strings.ReplaceAll(command, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	return exec.Command("osascript", "-e", `do shell script "`+escaped+`" with administrator privileges`).Run()
+	out, err := exec.Command("osascript", "-e", `do shell script "`+escaped+`" with administrator privileges`).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("administrator command failed: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func shell(s string) string {
@@ -98,4 +97,16 @@ func shellDir(path string) string {
 	b.WriteString(shell(path))
 	b.WriteString(")")
 	return b.String()
+}
+
+// AppleScript supplies no controlling terminal. macOS nohup can fail while
+// detaching from it, before the helper executes. Ignore HUP in the child shell
+// and explicitly detach all three standard streams instead.
+func backgroundCommand(executable string, args []string, logPath string) string {
+	words := []string{shell(executable)}
+	for _, arg := range args {
+		words = append(words, shell(arg))
+	}
+	child := "trap '' HUP; exec " + strings.Join(words, " ")
+	return "/bin/sh -c " + shell(child) + " </dev/null >> " + shell(logPath) + " 2>&1 &"
 }

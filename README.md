@@ -145,7 +145,8 @@ AP's regulatory domain; select the appropriate country for your hardware.
 The optional DHCP helper serves one device on the selected interface, ignores
 requests intended for another DHCP server/address, and stops after the run. A
 failed helper startup stops preparation before the AP is modified. The TFTP
-check verifies a complete local download; APBoot ping and the actual transfer
+check verifies a complete local download (through `127.0.0.1` on macOS to
+avoid routing through the Mac's own Ethernet alias); APBoot ping and the actual transfer
 still verify the AP-facing connection.
 
 `SUCCESS` requires matching versions in partitions 0 and 1, the target boot
@@ -158,8 +159,15 @@ serial and result before continuing.
 
 ## Logs And CSV Files
 
-Runtime files are written under `logs/`:
+Runtime files are written under `logs/` in the directory from which you launch
+the app. For example, launching from your home directory writes to `~/logs`.
+The exact session-log path appears above the live activity log. Logs remain
+local; the app does not upload error reports automatically.
 
+Files include:
+
+- `app-session-YYYYMMDD-HHMMSS-<unique-id>.log`: startup, station setup,
+  displayed errors, and live conversion output, starting before serial opens
 - `auto-convert-YYYYMMDD-HHMMSS-<unique-id>.log`
 - `conversion-results.csv`
 - `ap-inventory.csv`
@@ -174,7 +182,8 @@ These files are ignored by git.
 Use `Dump Debug Info` in the GUI or `Tools -> Dump Debug Info` to generate a
 single debug report. The report includes current UI settings, interface status,
 serial-port ownership, TFTP listener checks, ARP table, CSV tails, and recent
-conversion log tails.
+conversion and session log tails. Setup failures display the session-log path;
+DHCP startup failures also include the newly written helper error output.
 
 ## License
 

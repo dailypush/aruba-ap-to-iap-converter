@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,8 +102,10 @@ func Prepare(req Request, setup platform.Setup, log func(string)) (Prepared, err
 	}, log); err != nil {
 		return Prepared{}, err
 	}
-	if err := tftphelper.Verify(net.JoinHostPort(req.ServerIP, "69"), tftpImage, info.SHA256, 20*time.Second); err != nil {
-		return Prepared{}, err
+	verifyAddress := platform.TFTPVerifyAddress(req.ServerIP)
+	log("Checking local TFTP service at " + verifyAddress + "; APBoot server IP remains " + req.ServerIP)
+	if err := tftphelper.Verify(verifyAddress, tftpImage, info.SHA256, 20*time.Second); err != nil {
+		return Prepared{}, fmt.Errorf("local TFTP check at %s failed: %w", verifyAddress, err)
 	}
 	log("[OK] TFTP download matches the approved firmware")
 	log("[OK] serial port is free: " + req.SerialPort)

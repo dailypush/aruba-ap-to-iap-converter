@@ -2,14 +2,20 @@ package platform
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // The session file acknowledges startup and requests shutdown without killing
 // arbitrary processes or prompting for administrator rights a second time.
 func waitForHelper(logPath string, start func(readyPath string) error) (func() error, error) {
+	var logOffset int64
+	if info, err := os.Stat(logPath); err == nil {
+		logOffset = info.Size()
+	}
 	ready, err := os.CreateTemp(filepath.Dir(logPath), ".dhcp-session-*")
 	if err != nil {
 		return nil, err
@@ -51,5 +57,26 @@ func waitForHelper(logPath string, start func(readyPath string) error) (func() e
 	}
 	// Removing the session file also asks a delayed helper to stop.
 	os.Remove(path)
-	return nil, fmt.Errorf("DHCP helper did not become ready; check %s (another helper may already be running)", logPath)
+	return nil, helperStartupError(logPath, logOffset)
+}
+
+func helperStartupError(logPath string, offset int64) error {
+	message := "DHCP helper did not become ready"
+	if f, err := os.Open(logPath); err == nil {
+		defer f.Close()
+		if st, err := f.Stat(); err == nil {
+			if st.Size() < offset {
+				offset = 0
+			}
+			if st.Size()-offset > 4096 {
+				offset = st.Size() - 4096
+			}
+			if _, err := f.Seek(offset, io.SeekStart); err == nil {
+				if data, err := io.ReadAll(io.LimitReader(f, 4096)); err == nil && strings.TrimSpace(string(data)) != "" {
+					message += ":\n" + strings.TrimSpace(string(data))
+				}
+			}
+		}
+	}
+	return fmt.Errorf("%s\nHelper log: %s", message, logPath)
 }
